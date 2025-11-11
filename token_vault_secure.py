@@ -27,6 +27,7 @@ import re
 import gc
 import threading
 import time
+import random
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -231,6 +232,29 @@ def backup_vault_auto():
         except Exception:
             pass
 
+def op_change_master_password(vault: dict, old_passphrase: str):
+    print("\n--- Trocar senha mestra ---")
+    confirm = getpass.getpass("Confirme senha mestra atual: ")
+    if confirm != old_passphrase:
+        print("Senha incorreta. Abortando.")
+        return old_passphrase
+
+    new1 = getpass.getpass("Nova senha mestra: ")
+    new2 = getpass.getpass("Confirme nova senha: ")
+    if not new1 or new1 != new2:
+        print("Senhas não conferem ou vazias.")
+        return old_passphrase
+
+    # backup antes de trocar
+    backup_vault_auto()
+    try:
+        save_vault(vault, new1)
+        type_effect("Senha mestra atualizada com sucesso!", 0.02)
+        return new1
+    except Exception as e:
+        print("Erro ao salvar com nova senha:", e)
+        return old_passphrase
+
 # ---------------- Operations (menu) ----------------
 def op_add(vault, passphrase):
     print("\n--- Adicionar nova entrada ---")
@@ -420,6 +444,94 @@ def op_backup(vault: dict, passphrase: str):
         fdst.write(fsrc.read())
     print("Backup criado:", dest)
 
+def _parse_bak_ts(name: str) -> str:
+    """
+    Recebe um nome como 'vault.gpg.bak.20251110165144' e retorna
+    '2025-11-10 16:51:44' para exibição. Se não conseguir, retorna o nome.
+    """
+    try:
+        ts = name.rsplit('.', 1)[-1]
+        dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return name
+
+def op_restore(vault: dict, passphrase: str):
+    """
+    Lista backups disponíveis e permite restaurar um escolhendo pelo número.
+    Retorna o novo objeto vault (recarregado) ou o vault original se cancelar/erro.
+    """
+    print("\n--- Restaurar backup ---")
+    ensure_vault_dir()
+
+    # coletar backups (manuais e automáticos)
+    candidates = []
+    for p in sorted(VAULT_DIR.glob("vault.gpg.bak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        candidates.append(p)
+    for p in sorted(VAULT_DIR.glob("vault.gpg.manualbak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        candidates.append(p)
+
+    if not candidates:
+        print("Nenhum backup encontrado em:", VAULT_DIR)
+        return vault
+
+    # mostrar lista com índices
+    print("Backups encontrados:")
+    for i, p in enumerate(candidates, start=1):
+        pretty = _parse_bak_ts(p.name)
+        print(f"{i:2d}. {p.name}  ({pretty})")
+
+    print("\nDigite o número do backup para restaurar, ou Enter para cancelar.")
+    sel = input("Número: ").strip()
+    if not sel:
+        print("Restauração cancelada.")
+        return vault
+
+    try:
+        idx = int(sel) - 1
+        if idx < 0 or idx >= len(candidates):
+            print("Número inválido. Abortando.")
+            return vault
+    except ValueError:
+        print("Entrada inválida. Abortando.")
+        return vault
+
+    chosen = candidates[idx]
+    pretty_chosen = _parse_bak_ts(chosen.name)
+    confirm = sanitize_text(input(f"Confirma restaurar '{chosen.name}' ({pretty_chosen}) ? (digite YES para confirmar): ")).strip()
+    if confirm != "YES":
+        print("Restauração não confirmada. Abortando.")
+        return vault
+
+    # salvar cópia do arquivo atual antes de substituir
+    if VAULT_PATH.exists():
+        tmp_save = VAULT_PATH.parent / f"vault.gpg.pre_restore.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        try:
+            with open(VAULT_PATH, 'rb') as fsrc, open(tmp_save, 'wb') as fdst:
+                fdst.write(fsrc.read())
+            print(f"Cópia do vault atual salva em: {tmp_save.name}")
+        except Exception as e:
+            print("Falha ao salvar cópia do vault atual:", e)
+            return vault
+
+    # copiar o escolhido para vault.gpg
+    try:
+        with open(chosen, 'rb') as fsrc, open(VAULT_PATH, 'wb') as fdst:
+            fdst.write(fsrc.read())
+    except Exception as e:
+        print("Erro ao restaurar arquivo:", e)
+        return vault
+
+    # tentar recarregar cofre com a passphrase atual
+    try:
+        new_vault = load_vault(passphrase)
+        print("Backup restaurado com sucesso e cofre recarregado.")
+        return new_vault
+    except Exception as e:
+        print("Backup restaurado, mas falha ao recarregar o cofre com a passphrase atual:", e)
+        print("Se a passphrase for diferente para esse backup, utilize a opção de carregar manualmente.")
+        return vault
+
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -428,6 +540,38 @@ def pause():
 
 def header():
     print("Token Vault Secure - menu interativo")
+
+def type_effect(text, delay=0.02, newline=True):
+    """Imprime texto com efeito de digitação."""
+    for ch in text:
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        time.sleep(delay)
+    if newline:
+        print()
+
+def print_banner(title="Token Vault Secure", version="v1.0"):
+    frases = [
+        "A segurança começa na simplicidade.",
+        "Sem distrações, só propósito.",
+        "Tudo sob controle — de forma discreta.",
+        "Cada bit no seu devido lugar.",
+        "Feito por quem gosta de ver as engrenagens girarem."
+    ]
+    use_color = False
+    t = f"{title} {version}"
+    width = 60
+    pad = (width - len(t)) // 2
+    top = " " * pad + t + " " * (width - len(t) - pad)
+    esc = "\x1b[1;30m" if use_color else ""
+    reset = "\x1b[0m" if use_color else ""
+
+    print()
+    print(esc + "+" + "-" * (width) + "+" + reset)
+    print(esc + "|" + top + "|" + reset)
+    print(esc + "+" + "-" * (width) + "+" + reset)
+    print(esc + "  " + random.choice(frases) + reset)
+    print()
 
 # -------------- menu --------------
 def menu_loop():
@@ -441,7 +585,7 @@ def menu_loop():
 
     while True:
         clear_screen()
-        header()
+        print_banner("Token Vault Secure", "v0.4.1")
         print("\nEscolha uma opção:")
         print("1 - Adicionar entrada")
         print("2 - Recuperar entrada")
@@ -449,28 +593,42 @@ def menu_loop():
         print("4 - Excluir entrada")
         print("5 - Listar labels")
         print("6 - Backup manual")
-        print("7 - Sair")
+        print("7 - Trocar senha mestra")
+        print("8 - Restaurar backup")
+        print("99 - Sair")
         opt = input("Opção: ").strip()
         if opt == "1":
+            clear_screen()
             op_add(vault, passphrase)
             pause()
         elif opt == "2":
+            clear_screen()
             op_get(vault, passphrase)
             pause()
         elif opt == "3":
+            clear_screen()
             op_edit(vault, passphrase)
             pause()
         elif opt == "4":
             op_delete(vault, passphrase)
             pause()
         elif opt == "5":
+            clear_screen()
             op_list(vault, passphrase)
             pause()
         elif opt == "6":
             op_backup(vault, passphrase)
             pause()
         elif opt == "7":
-            print("Saindo. Até mais.")
+            passphrase = op_change_master_password(vault, passphrase)
+            pause()
+        elif opt == "8":
+            clear_screen()
+            # op_restore retorna o vault recarregado (ou o original)
+            vault = op_restore(vault, passphrase)
+            pause()
+        elif opt == "99":
+            type_effect("Saindo... até a próxima!", 0.02)
             break
         else:
             print("Opção inválida.")
