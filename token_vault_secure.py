@@ -28,6 +28,9 @@ import gc
 import threading
 import time
 import random
+import argparse
+import shutil
+import platform
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -126,24 +129,82 @@ def is_valid_label(label: str) -> bool:
     """Permite apenas caracteres seguros no label"""
     return bool(re.match(r'^[\w\s\-@.]+$', label))
 
-def copy_with_timeout(text: str, timeout=CLIPBOARD_TIMEOUT):
-    """Copia texto e limpa o clipboard após timeout"""
-    if not HAVE_CLIP:
-        return
+def _try_copy_plain(text: str) -> bool:
+    """Tenta copiar para clipboard usando várias opções. Retorna True se obteve sucesso."""
+    # 1) pyperclip se disponível
     try:
-        pyperclip.copy(text)
+        if HAVE_CLIP:
+            pyperclip.copy(text)
+            return True
+    except Exception:
+        pass
+
+    # 2) wl-copy (Wayland)
+    try:
+        if shutil.which("wl-copy"):
+            p = subprocess.run(["wl-copy"], input=text.encode('utf-8'))
+            return p.returncode == 0
+    except Exception:
+        pass
+
+    # 3) xclip (X11)
+    try:
+        if shutil.which("xclip"):
+            p = subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode('utf-8'))
+            return p.returncode == 0
+    except Exception:
+        pass
+
+    # 4) pbcopy (macOS)
+    try:
+        if platform.system() == "Darwin" and shutil.which("pbcopy"):
+            p = subprocess.run(["pbcopy"], input=text.encode('utf-8'))
+            return p.returncode == 0
+    except Exception:
+        pass
+
+    return False
+
+def copy_with_timeout(text: str, timeout=CLIPBOARD_TIMEOUT):
+    """Copia o texto para o clipboard e o limpa automaticamente após o tempo definido."""
+    try:
+        ok = _try_copy_plain(text)
+        if not ok:
+            print("(Aviso: clipboard indisponível — instale 'pyperclip' ou 'wl-copy/xclip/pbcopy')")
+            return
+
         print(f"(Copiado para clipboard — limparei em {timeout}s)")
+
         def clear_clip():
             time.sleep(timeout)
             try:
-                if pyperclip.paste() == text:
-                    pyperclip.copy('')
-                    print("(Clipboard limpo automaticamente)")
-            except Exception:
-                pass
+                same = False
+                if HAVE_CLIP:
+                    same = _try_get_clip_equals(text)
+
+                # Mesmo que não consiga confirmar, ainda tenta limpar
+                if same or not HAVE_CLIP:
+                    _try_copy_plain('')
+                    print("(Área de transferência limpa automaticamente)")
+                else:
+                    print("(Aviso: não foi possível verificar clipboard, limpe manualmente)")
+            except Exception as e:
+                print(f"(Erro ao limpar área de transferência: {e})")
+
         threading.Thread(target=clear_clip, daemon=True).start()
+
+    except Exception as e:
+        print(f"(Erro ao copiar para clipboard: {e})")
+
+def _try_get_clip_equals(text: str) -> bool:
+    """Tenta comparar conteúdo atual do clipboard com `text`. Retorna True se igual. Usa pyperclip se disponível."""
+    try:
+        if HAVE_CLIP:
+            return pyperclip.paste() == text
     except Exception:
-        pass
+        # não conseguiremos verificar em sistemas sem pyperclip; por segurança, não limpamos
+        return False
+    return False
 
 # ---------- KDF & AES ----------
 def derive_key(combined: str, salt: bytes, length=DERIVED_KEY_LEN):
@@ -295,7 +356,7 @@ def op_add(vault, passphrase):
     print("\nADICIONADO:", label)
     print(f"[{entry['meta']['dica1_name']}]: {k1}")
     print(f"[{entry['meta']['dica2_name']}]: {k2}")
-    copy_with_timeout(k1)
+    copy_with_timeout(secret)
     gc.collect()
 
 def op_get(vault, passphrase):
@@ -550,7 +611,7 @@ def type_effect(text, delay=0.02, newline=True):
     if newline:
         print()
 
-def print_banner(title="Token Vault Secure", version="v1.0"):
+def print_banner(title="Token Vault Secure", version=""):
     frases = [
         "A segurança começa na simplicidade.",
         "Sem distrações, só propósito.",
@@ -585,7 +646,7 @@ def menu_loop():
 
     while True:
         clear_screen()
-        print_banner("Token Vault Secure", "v0.4.1")
+        print_banner("Token Vault Secure", "v0.5.0")
         print("\nEscolha uma opção:")
         print("1 - Adicionar entrada")
         print("2 - Recuperar entrada")
@@ -634,11 +695,187 @@ def menu_loop():
             print("Opção inválida.")
             pause()
 
-def main():
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Token Vault Secure — CLI ou modo interativo"
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # Adicionar
+    add_p = sub.add_parser("add", help="Adicionar nova entrada")
+    add_p.add_argument("label")
+    add_p.add_argument("--dica1", help="Primeira dica (base64, use para evitar expansão do shell)")
+    add_p.add_argument("--dica2", help="Segunda dica (base64, use para evitar expansão do shell)")
+    add_p.add_argument("--secret", help="Valor secreto")
+
+    # Obter
+    get_p = sub.add_parser("get", help="Recuperar entrada existente")
+    get_p.add_argument("label")
+    get_p.add_argument("--dica1", help="Primeira dica (base64, use para evitar expansão do shell)")
+    get_p.add_argument("--dica2", help="Segunda dica (base64, use para evitar expansão do shell)")
+
+    # Listar
+    sub.add_parser("list", help="Listar labels armazenados")
+
+    # Excluir
+    del_p = sub.add_parser("delete", help="Excluir uma entrada")
+    del_p.add_argument("label")
+
+    # Backup e restauração
+    sub.add_parser("backup", help="Forçar criação de backup")
+    sub.add_parser("restore", help="Restaurar um backup existente")
+
+    # Trocar senha mestra
+    sub.add_parser("changepass", help="Alterar a senha mestra do cofre")
+
+    # Forçar menu
+    sub.add_parser("menu", help="Iniciar no modo interativo")
+
+    return parser.parse_args()
+
+def cli_mode(args):
     try:
-        menu_loop()
+        passphrase = getpass.getpass("Senha mestra do cofre: ")
     except KeyboardInterrupt:
         print("\nInterrompido. Saindo.")
+        return
+
+    # tentar abrir o vault e tratar erro de passphrase amigavelmente
+    try:
+        vault = load_vault(passphrase)
+    except RuntimeError:
+        print("Falha ao abrir vault: senha mestra incorreta ou vault corrompido.")
+        return
+    except Exception as e:
+        print("Erro ao abrir vault:", e)
+        return
+
+    try:
+        if args.command == "list":
+            if not vault:
+                print("Cofre vazio.")
+                return
+            print("\nEntradas:")
+            for lbl in vault.keys():
+                print(f" - {lbl}")
+
+        elif args.command == "add":
+            label = sanitize_text(args.label)
+
+            # === NOVO: tratar --dica1/--dica2 como nomes (descrições) e gerar chaves automaticamente ===
+            # dica1_name/dica2_name são o que será salvo em meta (nome/descrição).
+            # k1/k2 são os valores reais gerados automaticamente com gen_dica_auto().
+            dica1_name = args.dica1 if args.dica1 is not None else sanitize_text(input("Nome para Dica 1 (ou Enter para 'Dica 1'): "),)
+            if not dica1_name:
+                dica1_name = "Dica 1"
+            dica2_name = args.dica2 if args.dica2 is not None else sanitize_text(input("Nome para Dica 2 (ou Enter para 'Dica 2'): "),)
+            if not dica2_name:
+                dica2_name = "Dica 2"
+
+            # gerar os valores secretos das dicas
+            k1 = gen_dica_auto()
+            k2 = gen_dica_auto()
+
+            # se secret não veio, pedir
+            secret = args.secret or getpass.getpass("Valor secreto: ")
+            combined = k1 + "|" + k2
+            salt = secrets.token_bytes(SALT_LEN)
+            derived = derive_key(combined, salt)
+            nonce, ct = aesgcm_encrypt(secret.encode(), derived)
+            vault[label] = {
+                "meta": {
+                    "dica1_name": dica1_name,
+                    "dica2_name": dica2_name,
+                    "created": _now_ts()
+                },
+                "data": {
+                    "salt": binascii.hexlify(salt).decode(),
+                    "nonce": binascii.hexlify(nonce).decode(),
+                    "cipher_b64": base64.b64encode(ct).decode()
+                }
+            }
+            save_vault(vault, passphrase)
+
+            # saída no formato que você quer
+            print(f"\nADICIONADO: {label}")
+            print(f"[{dica1_name}]: {k1}")
+            print(f"[{dica2_name}]: {k2}")
+            # copia a primeira dica para clipboard (se disponível)
+            copy_with_timeout(secret)
+
+        elif args.command == "get":
+            label = args.label
+            entry = vault.get(label)
+            if not entry:
+                print("Registro não encontrado.")
+                return
+            salt = binascii.unhexlify(entry["data"]["salt"])
+            nonce = binascii.unhexlify(entry["data"]["nonce"])
+            ct = base64.b64decode(entry["data"]["cipher_b64"])
+
+            # suporte a base64 para evitar problemas com '!' no shell
+            dica1_val = args.dica1
+            dica2_val = args.dica2
+            if getattr(args, "dica1_b64", None):
+                try:
+                    dica1_val = base64.b64decode(args.dica1_b64).decode('utf-8')
+                except Exception:
+                    print("Não foi possível decodificar --dica1-b64.")
+                    return
+            if getattr(args, "dica2_b64", None):
+                try:
+                    dica2_val = base64.b64decode(args.dica2_b64).decode('utf-8')
+                except Exception:
+                    print("Não foi possível decodificar --dica2-b64.")
+                    return
+
+            combined = dica1_val + "|" + dica2_val
+            derived = derive_key(combined, salt)
+            try:
+                secret = aesgcm_decrypt(nonce, ct, derived).decode()
+                print(f"\nValor decifrado: {secret}")
+                copy_with_timeout(secret)
+            except Exception:
+                print("Falha ao decifrar — dicas incorretas?")
+
+        elif args.command == "delete":
+            if args.label not in vault:
+                print("Label não encontrada.")
+                return
+            confirm = input(f"Confirma exclusão de '{args.label}'? (s/n): ").lower()
+            if confirm == "s":
+                del vault[args.label]
+                save_vault(vault, passphrase)
+                print("Excluída com sucesso.")
+
+        elif args.command == "backup":
+            op_backup(vault, passphrase)
+
+        elif args.command == "restore":
+            op_restore(vault, passphrase)
+
+        elif args.command == "changepass":
+            op_change_master_password(vault, passphrase)
+
+        else:
+            print("Comando desconhecido ou inválido.")
+    except KeyboardInterrupt:
+        print("\nInterrompido. Saindo.")
+        return
+
+def main():
+    args = parse_args()
+    # Decide modo
+    if not args.command or args.command == "menu":
+        try:
+            menu_loop()
+        except KeyboardInterrupt:
+            print("\nInterrompido. Saindo.")
+    else:
+        try:
+            cli_mode(args)
+        except KeyboardInterrupt:
+            print("\nInterrompido. Saindo.")
 
 if __name__ == "__main__":
     main()
