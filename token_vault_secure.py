@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
-"""
-token_vault_secure.py
 
-Menu interactive vault (Model B improved)
-- Vault file encrypted with GPG symmetric AES256 (passphrase you enter)
-- Each entry encrypted with AES-GCM using a key derived from (dica1_value + '|' + dica2_value)
-  - Argon2id used if available, else PBKDF2-HMAC-SHA256 fallback
-- Menu: add / get / list / delete / backup / exit
-- Auto-generate strong dica values if you press Enter
-- Keeps up to 5 backups of vault.gpg
-
-Usage:
-  python3 token_vault_secure.py
-"""
-
+from __future__ import annotations
 import os
 import sys
 import json
@@ -33,6 +20,7 @@ import shutil
 import platform
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional, Dict, Any, Tuple, List
 
 # crypto libs (required)
 try:
@@ -60,41 +48,43 @@ try:
 except Exception:
     HAVE_CLIP = False
 
-# ---------------- CONFIG ----------------
+# ---------------- CONFIG (centralizado) ----------------
 HOME = Path.home()
-VAULT_DIR = HOME / ".vault"
-VAULT_PATH = VAULT_DIR / "vault.gpg"
-GPG_BIN = "gpg"
+VAULT_DIR = Path(os.getenv("VAULT_DIR", HOME / ".vault"))
+VAULT_PATH = Path(os.getenv("VAULT_PATH", VAULT_DIR / "vault.gpg"))
+GPG_BIN = os.getenv("GPG_BIN", "gpg")
 
-SALT_LEN = 16       # bytes
-NONCE_LEN = 12      # AES-GCM recommended
-DERIVED_KEY_LEN = 32  # bytes for AES-256
-ARGON2_TIME = 2
-ARGON2_MEM = 65536  # KiB (64 MiB)
-ARGON2_PAR = 1
-PBKDF2_ITERS = 250_000
+SALT_LEN = int(os.getenv("VAULT_SALT_LEN", "16"))
+NONCE_LEN = int(os.getenv("VAULT_NONCE_LEN", "12"))
+DERIVED_KEY_LEN = int(os.getenv("VAULT_DERIVED_LEN", "32"))
+ARGON2_TIME = int(os.getenv("VAULT_ARGON2_TIME", "2"))
+ARGON2_MEM = int(os.getenv("VAULT_ARGON2_MEM", "65536"))  # KiB
+ARGON2_PAR = int(os.getenv("VAULT_ARGON2_PAR", "1"))
+PBKDF2_ITERS = int(os.getenv("VAULT_PBKDF2_ITERS", "250000"))
 
-BACKUP_KEEP = 5     # keep last 5 backups
+BACKUP_KEEP = int(os.getenv("VAULT_BACKUP_KEEP", "5"))
 
-# length of auto-generated dica tokens (configurable)
-AUTO_DICA_LEN = 24   # characters (base62-ish)
-
-CLIPBOARD_TIMEOUT = 30  # segundos antes de limpar
+AUTO_DICA_LEN = int(os.getenv("VAULT_AUTO_DICA_LEN", "24"))
+CLIPBOARD_TIMEOUT = int(os.getenv("VAULT_CLIP_TIMEOUT", "30"))
 
 # ---------------- helpers ----------------
-# remove sequências ANSI / escape (ex.: ^[[F) e qualquer caractere não imprimível
 _ANSI_ESC_RE = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]|\x1B\[[0-9;]*[A-Za-z]')
 
-def ensure_vault_dir():
+def ensure_vault_dir() -> None:
     if not VAULT_DIR.exists():
         VAULT_DIR.mkdir(mode=0o700, parents=True)
+    else:
+        # garante permissões minimamente seguras
+        try:
+            VAULT_DIR.chmod(0o700)
+        except Exception:
+            pass
 
-def _now_ts():
+def _now_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _rand_base62(nchars):
+def _rand_base62(nchars: int) -> str:
     alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.!@#$%^&*"
-    # get enough random bytes and map to alphabet
     out = []
     while len(out) < nchars:
         num = int.from_bytes(secrets.token_bytes(6), 'big')
@@ -105,84 +95,97 @@ def _rand_base62(nchars):
             num //= len(alphabet)
     return ''.join(out[:nchars])
 
-def gen_dica_auto():
+def gen_dica_auto() -> str:
     return _rand_base62(AUTO_DICA_LEN)
 
-def sanitize_text(s: str, maxlen: int = None) -> str:
-    """
-    Remove sequências de escape ANSI e caracteres não imprimíveis.
-    Retorna string ASCII imprimível (0x20..0x7E). Trim opcional por maxlen.
-    """
+def sanitize_text(s: Optional[str], maxlen: Optional[int] = None) -> str:
     if s is None:
         return ''
-    # remove escapes ANSI (inclui \x1b[... sequences)
     s = _ANSI_ESC_RE.sub('', s)
-    # keep only printable ASCII (space (32) .. til (~ 126))
     s = ''.join(ch for ch in s if 32 <= ord(ch) <= 126)
-    # collapse multiple spaces to single, trim
     s = ' '.join(s.split())
     if maxlen is not None and len(s) > maxlen:
         s = s[:maxlen]
     return s
 
+def maybe_b64decode(value: str) -> str:
+    """Tenta decodificar a string de Base64; se falhar, retorna o original."""
+    if not value:
+        return ""
+    try:
+        decoded = base64.b64decode(value).decode('utf-8')
+        # Verifica se é texto legível (printable ASCII)
+        if all(32 <= ord(c) <= 126 for c in decoded):
+            return decoded
+    except Exception:
+        pass
+    return value
+
 def is_valid_label(label: str) -> bool:
-    """Permite apenas caracteres seguros no label"""
     return bool(re.match(r'^[\w\s\-@.]+$', label))
 
+def safe_input(prompt: str = "", maxlen: Optional[int] = None, default: Optional[str] = None) -> str:
+    """
+    Faz input() e sanitiza o resultado; retorna default se string vazia e default fornecido.
+    """
+    try:
+        raw = input(prompt)
+    except KeyboardInterrupt:
+        raise
+    val = sanitize_text(raw, maxlen=maxlen)
+    if not val and default is not None:
+        return default
+    return val
+
+# clipboard helpers
 def _try_copy_plain(text: str) -> bool:
-    """Tenta copiar para clipboard usando várias opções. Retorna True se obteve sucesso."""
-    # 1) pyperclip se disponível
     try:
         if HAVE_CLIP:
             pyperclip.copy(text)
             return True
     except Exception:
         pass
-
-    # 2) wl-copy (Wayland)
     try:
         if shutil.which("wl-copy"):
             p = subprocess.run(["wl-copy"], input=text.encode('utf-8'))
             return p.returncode == 0
     except Exception:
         pass
-
-    # 3) xclip (X11)
     try:
         if shutil.which("xclip"):
             p = subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode('utf-8'))
             return p.returncode == 0
     except Exception:
         pass
-
-    # 4) pbcopy (macOS)
     try:
         if platform.system() == "Darwin" and shutil.which("pbcopy"):
             p = subprocess.run(["pbcopy"], input=text.encode('utf-8'))
             return p.returncode == 0
     except Exception:
         pass
-
     return False
 
-def copy_with_timeout(text: str, timeout=CLIPBOARD_TIMEOUT):
-    """Copia o texto para o clipboard e o limpa automaticamente após o tempo definido."""
+def _try_get_clip_equals(text: str) -> bool:
+    try:
+        if HAVE_CLIP:
+            return pyperclip.paste() == text
+    except Exception:
+        return False
+    return False
+
+def copy_with_timeout(text: str, timeout: int = CLIPBOARD_TIMEOUT) -> None:
     try:
         ok = _try_copy_plain(text)
         if not ok:
             print("(Aviso: clipboard indisponível — instale 'pyperclip' ou 'wl-copy/xclip/pbcopy')")
             return
-
         print(f"(Copiado para clipboard — limparei em {timeout}s)")
-
         def clear_clip():
             time.sleep(timeout)
             try:
                 same = False
                 if HAVE_CLIP:
                     same = _try_get_clip_equals(text)
-
-                # Mesmo que não consiga confirmar, ainda tenta limpar
                 if same or not HAVE_CLIP:
                     _try_copy_plain('')
                     print("(Área de transferência limpa automaticamente)")
@@ -190,24 +193,12 @@ def copy_with_timeout(text: str, timeout=CLIPBOARD_TIMEOUT):
                     print("(Aviso: não foi possível verificar clipboard, limpe manualmente)")
             except Exception as e:
                 print(f"(Erro ao limpar área de transferência: {e})")
-
         threading.Thread(target=clear_clip, daemon=True).start()
-
     except Exception as e:
         print(f"(Erro ao copiar para clipboard: {e})")
 
-def _try_get_clip_equals(text: str) -> bool:
-    """Tenta comparar conteúdo atual do clipboard com `text`. Retorna True se igual. Usa pyperclip se disponível."""
-    try:
-        if HAVE_CLIP:
-            return pyperclip.paste() == text
-    except Exception:
-        # não conseguiremos verificar em sistemas sem pyperclip; por segurança, não limpamos
-        return False
-    return False
-
 # ---------- KDF & AES ----------
-def derive_key(combined: str, salt: bytes, length=DERIVED_KEY_LEN):
+def derive_key(combined: str, salt: bytes, length: int = DERIVED_KEY_LEN) -> bytes:
     pwd = combined.encode('utf-8')
     if USE_ARGON2:
         return hash_secret_raw(
@@ -222,18 +213,18 @@ def derive_key(combined: str, salt: bytes, length=DERIVED_KEY_LEN):
                          iterations=PBKDF2_ITERS, backend=default_backend())
         return kdf.derive(pwd)
 
-def aesgcm_encrypt(plaintext: bytes, key: bytes):
+def aesgcm_encrypt(plaintext: bytes, key: bytes) -> Tuple[bytes, bytes]:
     nonce = secrets.token_bytes(NONCE_LEN)
     aes = AESGCM(key)
-    ct = aes.encrypt(nonce, plaintext, associated_data=None)  # ciphertext||tag
+    ct = aes.encrypt(nonce, plaintext, associated_data=None)
     return nonce, ct
 
-def aesgcm_decrypt(nonce: bytes, ct: bytes, key: bytes):
+def aesgcm_decrypt(nonce: bytes, ct: bytes, key: bytes) -> bytes:
     aes = AESGCM(key)
     return aes.decrypt(nonce, ct, associated_data=None)
 
 # -------------- GPG wrappers --------------
-def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str):
+def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str) -> bool:
     with tempfile.NamedTemporaryFile(delete=False) as tf:
         tf.write(plain_bytes)
         tf.flush()
@@ -254,7 +245,7 @@ def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str):
         raise RuntimeError(p.stderr.decode(errors='ignore').strip())
     return True
 
-def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str):
+def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str) -> bytes:
     if not vault_path.exists():
         return b''
     cmd = [GPG_BIN, '--batch', '--yes', '--decrypt',
@@ -266,46 +257,53 @@ def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str):
     return p.stdout
 
 # -------------- vault IO --------------
-def load_vault(passphrase: str):
+def load_vault(passphrase: str) -> Dict[str, Any]:
     ensure_vault_dir()
     if not VAULT_PATH.exists():
         return {}
     raw = _gpg_decrypt_to_bytes(VAULT_PATH, passphrase)
     return json.loads(raw.decode('utf-8')) if raw else {}
 
-def save_vault(vobj: dict, passphrase: str):
+def save_vault(vobj: Dict[str, Any], passphrase: str) -> bool:
     ensure_vault_dir()
     plain = json.dumps(vobj, ensure_ascii=False, indent=2).encode('utf-8')
     return _gpg_encrypt_bytes(plain, VAULT_PATH, passphrase)
 
-def backup_vault_auto():
+def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
+    """
+    Cria backup do VAULT_PATH com prefixo e retorna o path criado.
+    Usado tanto para backups automáticos quanto manuais.
+    """
     if not VAULT_PATH.exists():
-        return
+        return None
     ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    bak = VAULT_PATH.parent / f"vault.gpg.bak.{ts}"
+    bak = VAULT_PATH.parent / f"{prefix}.{ts}"
     with open(VAULT_PATH, 'rb') as fsrc, open(bak, 'wb') as fdst:
         fdst.write(fsrc.read())
-    # prune older backups (keep last BACKUP_KEEP)
-    backups = sorted(VAULT_PATH.parent.glob("vault.gpg.bak.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # prune older
+    backups = sorted(VAULT_PATH.parent.glob(f"{prefix}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in backups[BACKUP_KEEP:]:
         try:
             old.unlink()
         except Exception:
             pass
+    return bak
 
-def op_change_master_password(vault: dict, old_passphrase: str):
+def backup_vault_auto() -> None:
+    create_backup("vault.gpg.bak")
+
+# ---------------- operations (menu) ----------------
+def op_change_master_password(vault: Dict[str, Any], old_passphrase: str) -> str:
     print("\n--- Trocar senha mestra ---")
     confirm = getpass.getpass("Confirme senha mestra atual: ")
     if confirm != old_passphrase:
         print("Senha incorreta. Abortando.")
         return old_passphrase
-
     new1 = getpass.getpass("Nova senha mestra: ")
     new2 = getpass.getpass("Confirme nova senha: ")
     if not new1 or new1 != new2:
         print("Senhas não conferem ou vazias.")
         return old_passphrase
-
     # backup antes de trocar
     backup_vault_auto()
     try:
@@ -316,26 +314,23 @@ def op_change_master_password(vault: dict, old_passphrase: str):
         print("Erro ao salvar com nova senha:", e)
         return old_passphrase
 
-# ---------------- Operations (menu) ----------------
-def op_add(vault, passphrase):
+def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Adicionar nova entrada ---")
-    label = sanitize_text(input("Label (nome identificador): "), maxlen=120)
+    label = safe_input("Label (nome identificador): ", maxlen=120)
     if not label or not is_valid_label(label):
         print("Label inválido.")
         return
     if label in vault:
         print("Já existe um registro com esse label.")
         return
-    dica1_name = sanitize_text(input("Dica 1 (descrição): "), maxlen=120)
-    dica2_name = sanitize_text(input("Dica 2 (descrição): "), maxlen=120)
-    k1 = sanitize_text(input("Valor Dica 1 (Enter p/ gerar): ")) or gen_dica_auto()
-    k2 = sanitize_text(input("Valor Dica 2 (Enter p/ gerar): ")) or gen_dica_auto()
+    dica1_name = safe_input("Dica 1 (descrição): ", maxlen=120)
+    dica2_name = safe_input("Dica 2 (descrição): ", maxlen=120)
+    k1 = sanitize_text(safe_input("Valor Dica 1 (Enter p/ gerar): ")) or gen_dica_auto()
+    k2 = sanitize_text(safe_input("Valor Dica 2 (Enter p/ gerar): ")) or gen_dica_auto()
     secret = getpass.getpass("Senha / secret: ")
     if not secret:
         print("Senha vazia; abortando.")
         return
-
-    # Encrypt secret with derived key from k1|k2
     combined = k1 + "|" + k2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
@@ -348,20 +343,23 @@ def op_add(vault, passphrase):
                  "nonce": binascii.hexlify(nonce).decode(),
                  "cipher_b64": base64.b64encode(ct).decode()}
     }
-
-    # backup and save
-    backup_vault_auto()
+    # backup + salvar
+    create_backup("vault.gpg.bak")
     vault[label] = entry
     save_vault(vault, passphrase)
     print("\nADICIONADO:", label)
     print(f"[{entry['meta']['dica1_name']}]: {k1}")
     print(f"[{entry['meta']['dica2_name']}]: {k2}")
     copy_with_timeout(secret)
+    # tentar reduzir exposição
+    secret = None
+    derived = None
+    combined = None
     gc.collect()
 
-def op_get(vault, passphrase):
+def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Recuperar entrada ---")
-    label = sanitize_text(input("Label: "), maxlen=120)
+    label = safe_input("Label: ", maxlen=120)
     if label not in vault:
         print("Registro não encontrado.")
         return
@@ -369,8 +367,8 @@ def op_get(vault, passphrase):
     meta = entry.get("meta", {})
     d1_name = meta.get("dica1_name", "Dica1")
     d2_name = meta.get("dica2_name", "Dica2")
-    v1 = sanitize_text(input(f"Digite [{d1_name}]: "))
-    v2 = sanitize_text(input(f"Digite [{d2_name}]: "))
+    v1 = safe_input(f"Digite [{d1_name}]: ")
+    v2 = safe_input(f"Digite [{d2_name}]: ")
     salt = binascii.unhexlify(entry["data"]["salt"])
     nonce = binascii.unhexlify(entry["data"]["nonce"])
     ct = base64.b64decode(entry["data"]["cipher_b64"])
@@ -383,9 +381,17 @@ def op_get(vault, passphrase):
         copy_with_timeout(secret)
     except Exception:
         print("Dicas incorretas ou dados corrompidos.")
-    gc.collect()
+    finally:
+        # reduzir exposição
+        derived = None
+        combined = None
+        try:
+            secret = None
+        except Exception:
+            pass
+        gc.collect()
 
-def op_list(vault: dict, passphrase: str):
+def op_list(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Labels cadastrados ---")
     if not vault:
         print("(nenhum registro)")
@@ -393,20 +399,20 @@ def op_list(vault: dict, passphrase: str):
     for k in sorted(vault.keys(), key=lambda s: s.lower()):
         print("-", k)
 
-def op_delete(vault: dict, passphrase: str):
+def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Excluir entrada ---")
-    label = sanitize_text(input("Label a excluir: "), maxlen=120)
+    label = safe_input("Label a excluir: ", maxlen=120)
     if not label:
         print("Label vazio.")
         return
     if label not in vault:
         print("Registro não encontrado.")
         return
-    confirm = sanitize_text(input(f"Confirma remoção de '{label}'? Digite o label completo para confirmar: "), maxlen=120)
+    confirm = safe_input(f"Confirma remoção de '{label}'? Digite o label completo para confirmar: ", maxlen=120)
     if confirm != label:
         print("Confirmação incorreta. Abortando.")
         return
-    backup_vault_auto()
+    create_backup("vault.gpg.bak")
     del vault[label]
     try:
         save_vault(vault, passphrase)
@@ -415,25 +421,22 @@ def op_delete(vault: dict, passphrase: str):
         return
     print("Removido com sucesso.")
 
-def op_edit(vault: dict, passphrase: str):
+def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Editar entrada ---")
-    label = sanitize_text(input("Label da entrada: "), maxlen=120)
+    label = safe_input("Label da entrada: ", maxlen=120)
     if not label:
         print("Label vazio.")
         return
     if label not in vault:
         print("Registro não encontrado.")
         return
-
     entry = vault[label]
     meta = entry.get("meta", {})
     data = entry.get("data", {})
     d1_name = meta.get("dica1_name", "Dica1")
     d2_name = meta.get("dica2_name", "Dica2")
-
-    # Pedir as dicas atuais para decriptar a senha
-    v1 = sanitize_text(input(f"Digite [{d1_name}] atual: "))
-    v2 = sanitize_text(input(f"Digite [{d2_name}] atual: "))
+    v1 = safe_input(f"Digite [{d1_name}] atual: ")
+    v2 = safe_input(f"Digite [{d2_name}] atual: ")
     try:
         salt = binascii.unhexlify(data["salt"])
         nonce = binascii.unhexlify(data["nonce"])
@@ -443,27 +446,21 @@ def op_edit(vault: dict, passphrase: str):
     except Exception:
         print("Dicas incorretas ou dados corrompidos. Abortando.")
         return
-
     print("\nValores atuais:")
     print(f"Label: {label}")
     print(f"{d1_name}: {v1}")
     print(f"{d2_name}: {v2}")
     print(f"Senha atual: {secret_old}")
     print("Deixe em branco para manter o valor atual.\n")
-
-    # Coletar novos valores (se informados)
-    new_d1_name = sanitize_text(input(f"Novo nome para [{d1_name}]: "), maxlen=120) or d1_name
-    new_d2_name = sanitize_text(input(f"Novo nome para [{d2_name}]: "), maxlen=120) or d2_name
-    new_v1 = sanitize_text(input(f"Novo valor para [{new_d1_name}]: ")) or v1
-    new_v2 = sanitize_text(input(f"Novo valor para [{new_d2_name}]: ")) or v2
+    new_d1_name = safe_input(f"Novo nome para [{d1_name}]: ", maxlen=120) or d1_name
+    new_d2_name = safe_input(f"Novo nome para [{d2_name}]: ", maxlen=120) or d2_name
+    new_v1 = safe_input(f"Novo valor para [{new_d1_name}]: ") or v1
+    new_v2 = safe_input(f"Novo valor para [{new_d2_name}]: ") or v2
     new_secret = getpass.getpass("Nova senha (Enter para manter): ") or secret_old
-
-    # Criptografa novamente com os novos valores
     combined = new_v1 + "|" + new_v2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
     nonce, ct = aesgcm_encrypt(new_secret.encode('utf-8'), derived)
-
     entry = {
         "meta": {
             "dica1_name": new_d1_name,
@@ -477,39 +474,37 @@ def op_edit(vault: dict, passphrase: str):
             "cipher_b64": base64.b64encode(ct).decode('ascii')
         }
     }
-
-    # backup + salvar
-    backup_vault_auto()
+    create_backup("vault.gpg.bak")
     vault[label] = entry
     try:
         save_vault(vault, passphrase)
     except Exception as e:
         print("Erro ao salvar alterações:", e)
         return
-
     print("\nEntrada atualizada com sucesso.")
     print(f"[{entry['meta']['dica1_name']}]: {new_v1}")
     print(f"[{entry['meta']['dica2_name']}]: {new_v2}")
     print("Anote novamente esses valores.")
-    del secret_old, derived, combined
+    # reduzir exposição
+    try:
+        secret_old = None
+    except Exception:
+        pass
+    derived = None
+    combined = None
     gc.collect()
 
-def op_backup(vault: dict, passphrase: str):
+def op_backup(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Backup manual do vault ---")
     ensure_vault_dir()
     if not VAULT_PATH.exists():
         print("Vault não existe. Nada a exportar.")
         return
-    dest = VAULT_PATH.parent / f"vault.gpg.manualbak.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    with open(VAULT_PATH, 'rb') as fsrc, open(dest, 'wb') as fdst:
-        fdst.write(fsrc.read())
-    print("Backup criado:", dest)
+    dest = create_backup("vault.gpg.manualbak")
+    if dest:
+        print("Backup criado:", dest)
 
 def _parse_bak_ts(name: str) -> str:
-    """
-    Recebe um nome como 'vault.gpg.bak.20251110165144' e retorna
-    '2025-11-10 16:51:44' para exibição. Se não conseguir, retorna o nome.
-    """
     try:
         ts = name.rsplit('.', 1)[-1]
         dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
@@ -517,37 +512,26 @@ def _parse_bak_ts(name: str) -> str:
     except Exception:
         return name
 
-def op_restore(vault: dict, passphrase: str):
-    """
-    Lista backups disponíveis e permite restaurar um escolhendo pelo número.
-    Retorna o novo objeto vault (recarregado) ou o vault original se cancelar/erro.
-    """
+def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
     print("\n--- Restaurar backup ---")
     ensure_vault_dir()
-
-    # coletar backups (manuais e automáticos)
-    candidates = []
+    candidates: List[Path] = []
     for p in sorted(VAULT_DIR.glob("vault.gpg.bak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
         candidates.append(p)
     for p in sorted(VAULT_DIR.glob("vault.gpg.manualbak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
         candidates.append(p)
-
     if not candidates:
         print("Nenhum backup encontrado em:", VAULT_DIR)
         return vault
-
-    # mostrar lista com índices
     print("Backups encontrados:")
     for i, p in enumerate(candidates, start=1):
         pretty = _parse_bak_ts(p.name)
         print(f"{i:2d}. {p.name}  ({pretty})")
-
     print("\nDigite o número do backup para restaurar, ou Enter para cancelar.")
     sel = input("Número: ").strip()
     if not sel:
         print("Restauração cancelada.")
         return vault
-
     try:
         idx = int(sel) - 1
         if idx < 0 or idx >= len(candidates):
@@ -556,15 +540,12 @@ def op_restore(vault: dict, passphrase: str):
     except ValueError:
         print("Entrada inválida. Abortando.")
         return vault
-
     chosen = candidates[idx]
     pretty_chosen = _parse_bak_ts(chosen.name)
     confirm = sanitize_text(input(f"Confirma restaurar '{chosen.name}' ({pretty_chosen}) ? (digite YES para confirmar): ")).strip()
     if confirm != "YES":
         print("Restauração não confirmada. Abortando.")
         return vault
-
-    # salvar cópia do arquivo atual antes de substituir
     if VAULT_PATH.exists():
         tmp_save = VAULT_PATH.parent / f"vault.gpg.pre_restore.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         try:
@@ -574,16 +555,12 @@ def op_restore(vault: dict, passphrase: str):
         except Exception as e:
             print("Falha ao salvar cópia do vault atual:", e)
             return vault
-
-    # copiar o escolhido para vault.gpg
     try:
         with open(chosen, 'rb') as fsrc, open(VAULT_PATH, 'wb') as fdst:
             fdst.write(fsrc.read())
     except Exception as e:
         print("Erro ao restaurar arquivo:", e)
         return vault
-
-    # tentar recarregar cofre com a passphrase atual
     try:
         new_vault = load_vault(passphrase)
         print("Backup restaurado com sucesso e cofre recarregado.")
@@ -593,17 +570,17 @@ def op_restore(vault: dict, passphrase: str):
         print("Se a passphrase for diferente para esse backup, utilize a opção de carregar manualmente.")
         return vault
 
-def clear_screen():
+# ---------------- UI / utilitários menores ----------------
+def clear_screen() -> None:
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def pause():
+def pause() -> None:
     input("\nPressione Enter para continuar...")
 
-def header():
+def header() -> None:
     print("Token Vault Secure - menu interativo")
 
-def type_effect(text, delay=0.02, newline=True):
-    """Imprime texto com efeito de digitação."""
+def type_effect(text: str, delay: float = 0.02, newline: bool = True) -> None:
     for ch in text:
         sys.stdout.write(ch)
         sys.stdout.flush()
@@ -611,7 +588,7 @@ def type_effect(text, delay=0.02, newline=True):
     if newline:
         print()
 
-def print_banner(title="Token Vault Secure", version=""):
+def print_banner(title: str = "Token Vault Secure", version: str = "") -> None:
     frases = [
         "A segurança começa na simplicidade.",
         "Sem distrações, só propósito.",
@@ -626,7 +603,6 @@ def print_banner(title="Token Vault Secure", version=""):
     top = " " * pad + t + " " * (width - len(t) - pad)
     esc = "\x1b[1;30m" if use_color else ""
     reset = "\x1b[0m" if use_color else ""
-
     print()
     print(esc + "+" + "-" * (width) + "+" + reset)
     print(esc + "|" + top + "|" + reset)
@@ -634,8 +610,8 @@ def print_banner(title="Token Vault Secure", version=""):
     print(esc + "  " + random.choice(frases) + reset)
     print()
 
-# -------------- menu --------------
-def menu_loop():
+# ---------------- menu / CLI ----------------
+def menu_loop() -> None:
     header()
     passphrase = getpass.getpass("Passphrase do cofre (será solicitada): ")
     try:
@@ -643,10 +619,9 @@ def menu_loop():
     except Exception as e:
         print("Erro ao abrir vault:", e)
         return
-
     while True:
         clear_screen()
-        print_banner("Token Vault Secure", "v0.5.0")
+        print_banner("Token Vault Secure", "v0.5.1")
         print("\nEscolha uma opção:")
         print("1 - Adicionar entrada")
         print("2 - Recuperar entrada")
@@ -659,35 +634,21 @@ def menu_loop():
         print("99 - Sair")
         opt = input("Opção: ").strip()
         if opt == "1":
-            clear_screen()
-            op_add(vault, passphrase)
-            pause()
+            clear_screen(); op_add(vault, passphrase); pause()
         elif opt == "2":
-            clear_screen()
-            op_get(vault, passphrase)
-            pause()
+            clear_screen(); op_get(vault, passphrase); pause()
         elif opt == "3":
-            clear_screen()
-            op_edit(vault, passphrase)
-            pause()
+            clear_screen(); op_edit(vault, passphrase); pause()
         elif opt == "4":
-            op_delete(vault, passphrase)
-            pause()
+            op_delete(vault, passphrase); pause()
         elif opt == "5":
-            clear_screen()
-            op_list(vault, passphrase)
-            pause()
+            clear_screen(); op_list(vault, passphrase); pause()
         elif opt == "6":
-            op_backup(vault, passphrase)
-            pause()
+            op_backup(vault, passphrase); pause()
         elif opt == "7":
-            passphrase = op_change_master_password(vault, passphrase)
-            pause()
+            passphrase = op_change_master_password(vault, passphrase); pause()
         elif opt == "8":
-            clear_screen()
-            # op_restore retorna o vault recarregado (ou o original)
-            vault = op_restore(vault, passphrase)
-            pause()
+            clear_screen(); vault = op_restore(vault, passphrase); pause()
         elif opt == "99":
             type_effect("Saindo... até a próxima!", 0.02)
             break
@@ -695,52 +656,43 @@ def menu_loop():
             print("Opção inválida.")
             pause()
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Token Vault Secure — CLI ou modo interativo"
     )
+    # Add
     sub = parser.add_subparsers(dest="command")
-
-    # Adicionar
     add_p = sub.add_parser("add", help="Adicionar nova entrada")
     add_p.add_argument("label")
-    add_p.add_argument("--dica1", help="Primeira dica (base64, use para evitar expansão do shell)")
-    add_p.add_argument("--dica2", help="Segunda dica (base64, use para evitar expansão do shell)")
+    add_p.add_argument("--dica1", help="Primeira dica (nome/descrição)")
+    add_p.add_argument("--dica2", help="Segunda dica (nome/descrição)")
     add_p.add_argument("--secret", help="Valor secreto")
-
-    # Obter
+    #Get
     get_p = sub.add_parser("get", help="Recuperar entrada existente")
     get_p.add_argument("label")
-    get_p.add_argument("--dica1", help="Primeira dica (base64, use para evitar expansão do shell)")
-    get_p.add_argument("--dica2", help="Segunda dica (base64, use para evitar expansão do shell)")
-
-    # Listar
+    get_p.add_argument("--dica1", help="Primeira dica (texto ou base64)")
+    get_p.add_argument("--dica2", help="Segunda dica (texto ou base64)")
+    # List
     sub.add_parser("list", help="Listar labels armazenados")
-
-    # Excluir
+    # Delete
     del_p = sub.add_parser("delete", help="Excluir uma entrada")
     del_p.add_argument("label")
-
-    # Backup e restauração
+    # Backup and restore
     sub.add_parser("backup", help="Forçar criação de backup")
     sub.add_parser("restore", help="Restaurar um backup existente")
-
-    # Trocar senha mestra
+    # Change master password
     sub.add_parser("changepass", help="Alterar a senha mestra do cofre")
-
-    # Forçar menu
+    # Menu and version
     sub.add_parser("menu", help="Iniciar no modo interativo")
-
+    parser.add_argument("--version", action="store_true", help="Exibe versão")
     return parser.parse_args()
 
-def cli_mode(args):
+def cli_mode(args: argparse.Namespace) -> None:
     try:
         passphrase = getpass.getpass("Senha mestra do cofre: ")
     except KeyboardInterrupt:
         print("\nInterrompido. Saindo.")
         return
-
-    # tentar abrir o vault e tratar erro de passphrase amigavelmente
     try:
         vault = load_vault(passphrase)
     except RuntimeError:
@@ -749,7 +701,6 @@ def cli_mode(args):
     except Exception as e:
         print("Erro ao abrir vault:", e)
         return
-
     try:
         if args.command == "list":
             if not vault:
@@ -758,51 +709,33 @@ def cli_mode(args):
             print("\nEntradas:")
             for lbl in vault.keys():
                 print(f" - {lbl}")
-
         elif args.command == "add":
             label = sanitize_text(args.label)
-
-            # === NOVO: tratar --dica1/--dica2 como nomes (descrições) e gerar chaves automaticamente ===
-            # dica1_name/dica2_name são o que será salvo em meta (nome/descrição).
-            # k1/k2 são os valores reais gerados automaticamente com gen_dica_auto().
-            dica1_name = args.dica1 if args.dica1 is not None else sanitize_text(input("Nome para Dica 1 (ou Enter para 'Dica 1'): "),)
+            dica1_name = args.dica1 if args.dica1 is not None else safe_input("Nome para Dica 1 (ou Enter para 'Dica 1'): ")
             if not dica1_name:
                 dica1_name = "Dica 1"
-            dica2_name = args.dica2 if args.dica2 is not None else sanitize_text(input("Nome para Dica 2 (ou Enter para 'Dica 2'): "),)
+            dica2_name = args.dica2 if args.dica2 is not None else safe_input("Nome para Dica 2 (ou Enter para 'Dica 2'): ")
             if not dica2_name:
                 dica2_name = "Dica 2"
-
-            # gerar os valores secretos das dicas
             k1 = gen_dica_auto()
             k2 = gen_dica_auto()
-
-            # se secret não veio, pedir
             secret = args.secret or getpass.getpass("Valor secreto: ")
             combined = k1 + "|" + k2
             salt = secrets.token_bytes(SALT_LEN)
             derived = derive_key(combined, salt)
             nonce, ct = aesgcm_encrypt(secret.encode(), derived)
             vault[label] = {
-                "meta": {
-                    "dica1_name": dica1_name,
-                    "dica2_name": dica2_name,
-                    "created": _now_ts()
-                },
-                "data": {
-                    "salt": binascii.hexlify(salt).decode(),
-                    "nonce": binascii.hexlify(nonce).decode(),
-                    "cipher_b64": base64.b64encode(ct).decode()
-                }
+                "meta": {"dica1_name": dica1_name, "dica2_name": dica2_name, "created": _now_ts()},
+                "data": {"salt": binascii.hexlify(salt).decode(), "nonce": binascii.hexlify(nonce).decode(), "cipher_b64": base64.b64encode(ct).decode()}
             }
             save_vault(vault, passphrase)
-
-            # saída no formato que você quer
             print(f"\nADICIONADO: {label}")
             print(f"[{dica1_name}]: {k1}")
             print(f"[{dica2_name}]: {k2}")
-            # copia a primeira dica para clipboard (se disponível)
             copy_with_timeout(secret)
-
+            # cleanup
+            secret = None; derived = None; combined = None
+            gc.collect()
         elif args.command == "get":
             label = args.label
             entry = vault.get(label)
@@ -812,24 +745,9 @@ def cli_mode(args):
             salt = binascii.unhexlify(entry["data"]["salt"])
             nonce = binascii.unhexlify(entry["data"]["nonce"])
             ct = base64.b64decode(entry["data"]["cipher_b64"])
-
-            # suporte a base64 para evitar problemas com '!' no shell
-            dica1_val = args.dica1
-            dica2_val = args.dica2
-            if getattr(args, "dica1_b64", None):
-                try:
-                    dica1_val = base64.b64decode(args.dica1_b64).decode('utf-8')
-                except Exception:
-                    print("Não foi possível decodificar --dica1-b64.")
-                    return
-            if getattr(args, "dica2_b64", None):
-                try:
-                    dica2_val = base64.b64decode(args.dica2_b64).decode('utf-8')
-                except Exception:
-                    print("Não foi possível decodificar --dica2-b64.")
-                    return
-
-            combined = dica1_val + "|" + dica2_val
+            dica1_val = maybe_b64decode(args.dica1)
+            dica2_val = maybe_b64decode(args.dica2)
+            combined = (dica1_val or "") + "|" + (dica2_val or "")
             derived = derive_key(combined, salt)
             try:
                 secret = aesgcm_decrypt(nonce, ct, derived).decode()
@@ -837,35 +755,40 @@ def cli_mode(args):
                 copy_with_timeout(secret)
             except Exception:
                 print("Falha ao decifrar — dicas incorretas?")
-
+            finally:
+                secret = None; derived = None; combined = None
+                gc.collect()
         elif args.command == "delete":
             if args.label not in vault:
                 print("Label não encontrada.")
                 return
             confirm = input(f"Confirma exclusão de '{args.label}'? (s/n): ").lower()
             if confirm == "s":
-                del vault[args.label]
-                save_vault(vault, passphrase)
-                print("Excluída com sucesso.")
-
+                del vault[args.label]; save_vault(vault, passphrase); print("Excluída com sucesso.")
         elif args.command == "backup":
             op_backup(vault, passphrase)
-
         elif args.command == "restore":
             op_restore(vault, passphrase)
-
         elif args.command == "changepass":
             op_change_master_password(vault, passphrase)
-
         else:
             print("Comando desconhecido ou inválido.")
     except KeyboardInterrupt:
         print("\nInterrompido. Saindo.")
         return
 
-def main():
+def check_dependencies() -> None:
+    # Verifica presença de gpg (evita erros tardios)
+    if not shutil.which(GPG_BIN):
+        print(f"ERRO: '{GPG_BIN}' não encontrado no PATH. Instale o GPG ou ajuste GPG_BIN.")
+        sys.exit(1)
+
+def main() -> None:
+    check_dependencies()  # fail fast
     args = parse_args()
-    # Decide modo
+    if getattr(args, "version", False):
+        print("Token Vault Secure - v0.5.1")
+        return
     if not args.command or args.command == "menu":
         try:
             menu_loop()
