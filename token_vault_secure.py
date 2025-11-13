@@ -121,8 +121,8 @@ def maybe_b64decode(value: str) -> str:
         pass
     return value
 
-def is_valid_label(label: str) -> bool:
-    return bool(re.match(r'^[\w\s\-@.]+$', label))
+def is_valid_alias(alias: str) -> bool:
+    return bool(re.match(r'^[\w\s\-@.]+$', alias))
 
 def safe_input(prompt: str = "", maxlen: Optional[int] = None, default: Optional[str] = None) -> str:
     """
@@ -316,12 +316,12 @@ def op_change_master_password(vault: Dict[str, Any], old_passphrase: str) -> str
 
 def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Adicionar nova entrada ---")
-    label = safe_input("Label (nome identificador): ", maxlen=120)
-    if not label or not is_valid_label(label):
-        print("Label inválido.")
+    alias = safe_input("Alias (nome identificador): ", maxlen=120)
+    if not alias or not is_valid_alias(alias):
+        print("Alias inválido.")
         return
-    if label in vault:
-        print("Já existe um registro com esse label.")
+    if alias in vault:
+        print("Já existe um registro com esse alias.")
         return
     dica1_name = safe_input("Dica 1 (descrição): ", maxlen=120)
     dica2_name = safe_input("Dica 2 (descrição): ", maxlen=120)
@@ -345,9 +345,9 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     }
     # backup + salvar
     create_backup("vault.gpg.bak")
-    vault[label] = entry
+    vault[alias] = entry
     save_vault(vault, passphrase)
-    print("\nADICIONADO:", label)
+    print("\nADICIONADO:", alias)
     print(f"[{entry['meta']['dica1_name']}]: {k1}")
     print(f"[{entry['meta']['dica2_name']}]: {k2}")
     copy_with_timeout(secret)
@@ -359,11 +359,11 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Recuperar entrada ---")
-    label = safe_input("Label: ", maxlen=120)
-    if label not in vault:
+    alias = safe_input("Alias: ", maxlen=120)
+    if alias not in vault:
         print("Registro não encontrado.")
         return
-    entry = vault[label]
+    entry = vault[alias]
     meta = entry.get("meta", {})
     d1_name = meta.get("dica1_name", "Dica1")
     d2_name = meta.get("dica2_name", "Dica2")
@@ -376,7 +376,7 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     derived = derive_key(combined, salt)
     try:
         secret = aesgcm_decrypt(nonce, ct, derived).decode()
-        print(f"\nLabel: {label}")
+        print(f"\nAlias: {alias}")
         print(f"Senha: {secret}")
         copy_with_timeout(secret)
     except Exception:
@@ -392,7 +392,7 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
         gc.collect()
 
 def op_list(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Labels cadastrados ---")
+    print("\n--- Aliass cadastrados ---")
     if not vault:
         print("(nenhum registro)")
         return
@@ -401,19 +401,19 @@ def op_list(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Excluir entrada ---")
-    label = safe_input("Label a excluir: ", maxlen=120)
-    if not label:
-        print("Label vazio.")
+    alias = safe_input("Alias a excluir: ", maxlen=120)
+    if not alias:
+        print("Alias vazio.")
         return
-    if label not in vault:
+    if alias not in vault:
         print("Registro não encontrado.")
         return
-    confirm = safe_input(f"Confirma remoção de '{label}'? Digite o label completo para confirmar: ", maxlen=120)
-    if confirm != label:
+    confirm = safe_input(f"Confirma remoção de '{alias}'? Digite o alias completo para confirmar: ", maxlen=120)
+    if confirm != alias:
         print("Confirmação incorreta. Abortando.")
         return
     create_backup("vault.gpg.bak")
-    del vault[label]
+    del vault[alias]
     try:
         save_vault(vault, passphrase)
     except Exception as e:
@@ -423,14 +423,14 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Editar entrada ---")
-    label = safe_input("Label da entrada: ", maxlen=120)
-    if not label:
-        print("Label vazio.")
+    alias = safe_input("Alias da entrada: ", maxlen=120)
+    if not alias:
+        print("Alias vazio.")
         return
-    if label not in vault:
+    if alias not in vault:
         print("Registro não encontrado.")
         return
-    entry = vault[label]
+    entry = vault[alias]
     meta = entry.get("meta", {})
     data = entry.get("data", {})
     d1_name = meta.get("dica1_name", "Dica1")
@@ -447,7 +447,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         print("Dicas incorretas ou dados corrompidos. Abortando.")
         return
     print("\nValores atuais:")
-    print(f"Label: {label}")
+    print(f"Alias: {alias}")
     print(f"{d1_name}: {v1}")
     print(f"{d2_name}: {v2}")
     print(f"Senha atual: {secret_old}")
@@ -475,7 +475,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         }
     }
     create_backup("vault.gpg.bak")
-    vault[label] = entry
+    vault[alias] = entry
     try:
         save_vault(vault, passphrase)
     except Exception as e:
@@ -621,13 +621,13 @@ def menu_loop() -> None:
         return
     while True:
         clear_screen()
-        print_banner("Token Vault Secure", "v0.5.1")
+        print_banner("Token Vault Secure", "v0.5.2")
         print("\nEscolha uma opção:")
-        print("1 - Adicionar entrada")
-        print("2 - Recuperar entrada")
-        print("3 - Editar entrada")
-        print("4 - Excluir entrada")
-        print("5 - Listar labels")
+        print("1 - Adicionar alias")
+        print("2 - Recuperar alias")
+        print("3 - Editar alias")
+        print("4 - Excluir alias")
+        print("5 - Listar aliases")
         print("6 - Backup manual")
         print("7 - Trocar senha mestra")
         print("8 - Restaurar backup")
@@ -662,23 +662,23 @@ def parse_args() -> argparse.Namespace:
     )
     # Add
     sub = parser.add_subparsers(dest="command")
-    add_p = sub.add_parser("add", help="Adicionar nova entrada")
-    add_p.add_argument("label")
-    add_p.add_argument("--dica1", help="Primeira dica (nome/descrição)")
-    add_p.add_argument("--dica2", help="Segunda dica (nome/descrição)")
+    add_p = sub.add_parser("add", help="Adicionar novo alias")
+    add_p.add_argument("alias")
+    add_p.add_argument("--dica1", help="Descrição da primeiro dica (Chave gerada automaticamente)")
+    add_p.add_argument("--dica2", help="Descrição da segunda dica (Chave gerada automaticamente)")
     add_p.add_argument("--secret", help="Valor secreto")
     #Get
-    get_p = sub.add_parser("get", help="Recuperar entrada existente")
-    get_p.add_argument("label")
-    get_p.add_argument("--dica1", help="Primeira dica (texto ou base64)")
-    get_p.add_argument("--dica2", help="Segunda dica (texto ou base64)")
+    get_p = sub.add_parser("get", help="Recuperar alias existente")
+    get_p.add_argument("alias")
+    get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica (texto ou base64)")
+    get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica (texto ou base64)")
     # List
-    sub.add_parser("list", help="Listar labels armazenados")
+    sub.add_parser("list", help="Listar aliases armazenados")
     # Delete
-    del_p = sub.add_parser("delete", help="Excluir uma entrada")
-    del_p.add_argument("label")
+    del_p = sub.add_parser("delete", help="Excluir um alias")
+    del_p.add_argument("alias")
     # Backup and restore
-    sub.add_parser("backup", help="Forçar criação de backup")
+    sub.add_parser("backup", help="Gera um backup manual")
     sub.add_parser("restore", help="Restaurar um backup existente")
     # Change master password
     sub.add_parser("changepass", help="Alterar a senha mestra do cofre")
@@ -710,7 +710,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             for lbl in vault.keys():
                 print(f" - {lbl}")
         elif args.command == "add":
-            label = sanitize_text(args.label)
+            alias = sanitize_text(args.alias)
             dica1_name = args.dica1 if args.dica1 is not None else safe_input("Nome para Dica 1 (ou Enter para 'Dica 1'): ")
             if not dica1_name:
                 dica1_name = "Dica 1"
@@ -724,12 +724,12 @@ def cli_mode(args: argparse.Namespace) -> None:
             salt = secrets.token_bytes(SALT_LEN)
             derived = derive_key(combined, salt)
             nonce, ct = aesgcm_encrypt(secret.encode(), derived)
-            vault[label] = {
+            vault[alias] = {
                 "meta": {"dica1_name": dica1_name, "dica2_name": dica2_name, "created": _now_ts()},
                 "data": {"salt": binascii.hexlify(salt).decode(), "nonce": binascii.hexlify(nonce).decode(), "cipher_b64": base64.b64encode(ct).decode()}
             }
             save_vault(vault, passphrase)
-            print(f"\nADICIONADO: {label}")
+            print(f"\nADICIONADO: {alias}")
             print(f"[{dica1_name}]: {k1}")
             print(f"[{dica2_name}]: {k2}")
             copy_with_timeout(secret)
@@ -737,8 +737,8 @@ def cli_mode(args: argparse.Namespace) -> None:
             secret = None; derived = None; combined = None
             gc.collect()
         elif args.command == "get":
-            label = args.label
-            entry = vault.get(label)
+            alias = args.alias
+            entry = vault.get(alias)
             if not entry:
                 print("Registro não encontrado.")
                 return
@@ -759,12 +759,12 @@ def cli_mode(args: argparse.Namespace) -> None:
                 secret = None; derived = None; combined = None
                 gc.collect()
         elif args.command == "delete":
-            if args.label not in vault:
-                print("Label não encontrada.")
+            if args.alias not in vault:
+                print("Alias não encontrada.")
                 return
-            confirm = input(f"Confirma exclusão de '{args.label}'? (s/n): ").lower()
+            confirm = input(f"Confirma exclusão de '{args.alias}'? (s/n): ").lower()
             if confirm == "s":
-                del vault[args.label]; save_vault(vault, passphrase); print("Excluída com sucesso.")
+                del vault[args.alias]; save_vault(vault, passphrase); print("Excluída com sucesso.")
         elif args.command == "backup":
             op_backup(vault, passphrase)
         elif args.command == "restore":
@@ -787,7 +787,7 @@ def main() -> None:
     check_dependencies()  # fail fast
     args = parse_args()
     if getattr(args, "version", False):
-        print("Token Vault Secure - v0.5.1")
+        print("Token Vault Secure - v0.5.2")
         return
     if not args.command or args.command == "menu":
         try:
