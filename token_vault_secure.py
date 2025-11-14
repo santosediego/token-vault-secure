@@ -292,6 +292,28 @@ def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
 def backup_vault_auto() -> None:
     create_backup("vault.gpg.bak")
 
+# ---------------- helper para extras input ----------------
+def prompt_extras_interactive(existing: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    Loop interativo para inserir/editar pares chave/valor em extras.
+    Retorna dict (padrão {} se vazio).
+    """
+    extras = dict(existing) if existing else {}
+    print("\n--- Extras (opcional) ---")
+    print("Insira pares chave=valor. Deixe em branco e pressione Enter quando terminar.")
+    if extras:
+        print("Extras atuais:")
+        for k, v in extras.items():
+            print(f" - {k}: {v}")
+    while True:
+        raw = safe_input("Chave (Enter p/ terminar): ").strip()
+        if not raw:
+            break
+        key = sanitize_text(raw, maxlen=120)
+        val = safe_input(f"Valor para '{key}': ")
+        extras[key] = val
+    return extras
+
 # ---------------- operations (menu) ----------------
 def op_change_master_password(vault: Dict[str, Any], old_passphrase: str) -> str:
     print("\n--- Trocar senha mestra ---")
@@ -314,8 +336,46 @@ def op_change_master_password(vault: Dict[str, Any], old_passphrase: str) -> str
         print("Erro ao salvar com nova senha:", e)
         return old_passphrase
 
+def _pack_secret_and_extras(secret: str, extras: Optional[Dict[str, str]] = None) -> bytes:
+    """
+    Retorna bytes do payload JSON contendo 'secret' e 'extras' (mesmo que extras seja {}).
+    """
+    payload = {"secret": secret}
+    if extras:
+        payload["extras"] = extras
+    else:
+        payload["extras"] = {}
+    return json.dumps(payload, ensure_ascii=False).encode('utf-8')
+
+def _unpack_secret_and_extras(plaintext_bytes: bytes) -> Tuple[str, Dict[str, str]]:
+    """
+    Tenta interpretar plaintext_bytes como JSON {"secret":..., "extras":{...}}.
+    Se não for JSON, assume que é apenas a senha e retorna (senha_str, {}).
+    """
+    try:
+        text = plaintext_bytes.decode('utf-8')
+    except Exception:
+        # fallback: try latin-1 then as best-effort text
+        try:
+            text = plaintext_bytes.decode('latin-1')
+        except Exception:
+            return ("", {})
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "secret" in obj:
+            extras = obj.get("extras", {}) or {}
+            # ensure extras values are str
+            if not isinstance(extras, dict):
+                extras = {}
+            extras = {str(k): str(v) for k, v in extras.items()}
+            return (str(obj["secret"]), extras)
+    except Exception:
+        # not JSON — old format (plain secret)
+        return (text, {})
+    return (text, {})
+
 def op_add(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Adicionar nova entrada ---")
+    print("\n--- Adicionar novo alias ---")
     alias = safe_input("Alias (nome identificador): ", maxlen=120)
     if not alias or not is_valid_alias(alias):
         print("Alias inválido.")
@@ -331,10 +391,14 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     if not secret:
         print("Senha vazia; abortando.")
         return
+    # extras interativo
+    extras = prompt_extras_interactive()
     combined = k1 + "|" + k2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
-    nonce, ct = aesgcm_encrypt(secret.encode(), derived)
+    # pack secret + extras into JSON bytes, then encrypt
+    payload_bytes = _pack_secret_and_extras(secret, extras)
+    nonce, ct = aesgcm_encrypt(payload_bytes, derived)
     entry = {
         "meta": {"dica1_name": dica1_name or "Dica1",
                  "dica2_name": dica2_name or "Dica2",
@@ -350,15 +414,20 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\nADICIONADO:", alias)
     print(f"[{entry['meta']['dica1_name']}]: {k1}")
     print(f"[{entry['meta']['dica2_name']}]: {k2}")
+    if extras:
+        print("Extras adicionados:")
+        for kk, vv in extras.items():
+            print(f" - {kk}: {vv}")
     copy_with_timeout(secret)
     # tentar reduzir exposição
     secret = None
     derived = None
     combined = None
+    payload_bytes = None
     gc.collect()
 
 def op_get(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Recuperar entrada ---")
+    print("\n--- Recuperar alias ---")
     alias = safe_input("Alias: ", maxlen=120)
     if alias not in vault:
         print("Registro não encontrado.")
@@ -375,9 +444,14 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     combined = v1 + "|" + v2
     derived = derive_key(combined, salt)
     try:
-        secret = aesgcm_decrypt(nonce, ct, derived).decode()
+        plaintext = aesgcm_decrypt(nonce, ct, derived)
+        secret, extras = _unpack_secret_and_extras(plaintext)
         print(f"\nAlias: {alias}")
         print(f"Senha: {secret}")
+        if extras:
+            print("\nExtras:")
+            for k, val in extras.items():
+                print(f" - {k}: {val}")
         copy_with_timeout(secret)
     except Exception:
         print("Dicas incorretas ou dados corrompidos.")
@@ -392,7 +466,7 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
         gc.collect()
 
 def op_list(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Aliass cadastrados ---")
+    print("\n--- Aliases cadastrados ---")
     if not vault:
         print("(nenhum registro)")
         return
@@ -400,10 +474,10 @@ def op_list(vault: Dict[str, Any], passphrase: str) -> None:
         print("-", k)
 
 def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Excluir entrada ---")
-    alias = safe_input("Alias a excluir: ", maxlen=120)
+    print("\n--- Excluir alias ---")
+    alias = safe_input("Alias: ", maxlen=120)
     if not alias:
-        print("Alias vazio.")
+        print("É necessário informar um alias.")
         return
     if alias not in vault:
         print("Registro não encontrado.")
@@ -422,10 +496,10 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     print("Removido com sucesso.")
 
 def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Editar entrada ---")
-    alias = safe_input("Alias da entrada: ", maxlen=120)
+    print("\n--- Editar alias ---")
+    alias = safe_input("Alias: ", maxlen=120)
     if not alias:
-        print("Alias vazio.")
+        print("É necessário informar um alias.")
         return
     if alias not in vault:
         print("Registro não encontrado.")
@@ -442,7 +516,8 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         nonce = binascii.unhexlify(data["nonce"])
         ct = base64.b64decode(data["cipher_b64"])
         derived = derive_key(v1 + "|" + v2, salt)
-        secret_old = aesgcm_decrypt(nonce, ct, derived).decode('utf-8')
+        plaintext = aesgcm_decrypt(nonce, ct, derived)
+        secret_old, extras_old = _unpack_secret_and_extras(plaintext)
     except Exception:
         print("Dicas incorretas ou dados corrompidos. Abortando.")
         return
@@ -451,16 +526,27 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     print(f"{d1_name}: {v1}")
     print(f"{d2_name}: {v2}")
     print(f"Senha atual: {secret_old}")
+    if extras_old:
+        print("Extras atuais:")
+        for k, val in extras_old.items():
+            print(f" - {k}: {val}")
     print("Deixe em branco para manter o valor atual.\n")
     new_d1_name = safe_input(f"Novo nome para [{d1_name}]: ", maxlen=120) or d1_name
     new_d2_name = safe_input(f"Novo nome para [{d2_name}]: ", maxlen=120) or d2_name
     new_v1 = safe_input(f"Novo valor para [{new_d1_name}]: ") or v1
     new_v2 = safe_input(f"Novo valor para [{new_d2_name}]: ") or v2
     new_secret = getpass.getpass("Nova senha (Enter para manter): ") or secret_old
+    # editar extras?
+    edit_extras = safe_input("Editar extras? (s/N): ").lower() == "s"
+    if edit_extras:
+        new_extras = prompt_extras_interactive(existing=extras_old)
+    else:
+        new_extras = extras_old or {}
     combined = new_v1 + "|" + new_v2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
-    nonce, ct = aesgcm_encrypt(new_secret.encode('utf-8'), derived)
+    payload_bytes = _pack_secret_and_extras(new_secret, new_extras)
+    nonce, ct = aesgcm_encrypt(payload_bytes, derived)
     entry = {
         "meta": {
             "dica1_name": new_d1_name,
@@ -481,7 +567,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     except Exception as e:
         print("Erro ao salvar alterações:", e)
         return
-    print("\nEntrada atualizada com sucesso.")
+    print("\nAlias atualizado com sucesso.")
     print(f"[{entry['meta']['dica1_name']}]: {new_v1}")
     print(f"[{entry['meta']['dica2_name']}]: {new_v2}")
     print("Anote novamente esses valores.")
@@ -492,6 +578,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         pass
     derived = None
     combined = None
+    payload_bytes = None
     gc.collect()
 
 def op_backup(vault: Dict[str, Any], passphrase: str) -> None:
@@ -621,7 +708,7 @@ def menu_loop() -> None:
         return
     while True:
         clear_screen()
-        print_banner("Token Vault Secure", "v0.5.2")
+        print_banner("Token Vault Secure", "v0.6.0")
         print("\nEscolha uma opção:")
         print("1 - Adicionar alias")
         print("2 - Recuperar alias")
@@ -667,6 +754,7 @@ def parse_args() -> argparse.Namespace:
     add_p.add_argument("--dica1", help="Descrição da primeiro dica (Chave gerada automaticamente)")
     add_p.add_argument("--dica2", help="Descrição da segunda dica (Chave gerada automaticamente)")
     add_p.add_argument("--secret", help="Valor secreto")
+    add_p.add_argument("--extras-json", help="Extras em JSON (ex: '{\"totp\":\"JBS...\",\"nota\":\"...\"}')")
     #Get
     get_p = sub.add_parser("get", help="Recuperar alias existente")
     get_p.add_argument("alias")
@@ -706,7 +794,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             if not vault:
                 print("Cofre vazio.")
                 return
-            print("\nEntradas:")
+            print("\nAliases:")
             for lbl in vault.keys():
                 print(f" - {lbl}")
         elif args.command == "add":
@@ -720,10 +808,27 @@ def cli_mode(args: argparse.Namespace) -> None:
             k1 = gen_dica_auto()
             k2 = gen_dica_auto()
             secret = args.secret or getpass.getpass("Valor secreto: ")
+            # extras from CLI JSON
+            extras = {}
+            if getattr(args, "extras_json", None):
+                try:
+                    extras = json.loads(args.extras_json)
+                    if not isinstance(extras, dict):
+                        print(" --extras-json deve ser um objeto JSON (dicionário). Ignorando extras.")
+                        extras = {}
+                except Exception:
+                    print("Não foi possível interpretar --extras-json como JSON. Ignorando extras.")
+                    extras = {}
+            else:
+                # interactive prompt for extras (if desired)
+                want = safe_input("Deseja adicionar extras (nota, totp, etc.)? (s/N): ").lower() == "s"
+                if want:
+                    extras = prompt_extras_interactive()
             combined = k1 + "|" + k2
             salt = secrets.token_bytes(SALT_LEN)
             derived = derive_key(combined, salt)
-            nonce, ct = aesgcm_encrypt(secret.encode(), derived)
+            payload_bytes = _pack_secret_and_extras(secret, extras)
+            nonce, ct = aesgcm_encrypt(payload_bytes, derived)
             vault[alias] = {
                 "meta": {"dica1_name": dica1_name, "dica2_name": dica2_name, "created": _now_ts()},
                 "data": {"salt": binascii.hexlify(salt).decode(), "nonce": binascii.hexlify(nonce).decode(), "cipher_b64": base64.b64encode(ct).decode()}
@@ -732,9 +837,13 @@ def cli_mode(args: argparse.Namespace) -> None:
             print(f"\nADICIONADO: {alias}")
             print(f"[{dica1_name}]: {k1}")
             print(f"[{dica2_name}]: {k2}")
+            if extras:
+                print("Extras adicionados:")
+                for kk, vv in extras.items():
+                    print(f" - {kk}: {vv}")
             copy_with_timeout(secret)
             # cleanup
-            secret = None; derived = None; combined = None
+            secret = None; derived = None; combined = None; payload_bytes = None
             gc.collect()
         elif args.command == "get":
             alias = args.alias
@@ -750,8 +859,13 @@ def cli_mode(args: argparse.Namespace) -> None:
             combined = (dica1_val or "") + "|" + (dica2_val or "")
             derived = derive_key(combined, salt)
             try:
-                secret = aesgcm_decrypt(nonce, ct, derived).decode()
+                plaintext = aesgcm_decrypt(nonce, ct, derived)
+                secret, extras = _unpack_secret_and_extras(plaintext)
                 print(f"\nValor decifrado: {secret}")
+                if extras:
+                    print("\nExtras:")
+                    for k, v in extras.items():
+                        print(f" - {k}: {v}")
                 copy_with_timeout(secret)
             except Exception:
                 print("Falha ao decifrar — dicas incorretas?")
@@ -787,7 +901,7 @@ def main() -> None:
     check_dependencies()  # fail fast
     args = parse_args()
     if getattr(args, "version", False):
-        print("Token Vault Secure - v0.5.2")
+        print("Token Vault Secure - v0.6.0")
         return
     if not args.command or args.command == "menu":
         try:
