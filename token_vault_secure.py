@@ -230,7 +230,7 @@ def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str) -> b
         tf.flush()
         tmp = tf.name
     cmd = [
-        GPG_BIN, '--batch', '--yes', '--symmetric', '--cipher-algo', 'AES256',
+        GPG_BIN, '--batch', '--yes', '--pinentry-mode', 'loopback', '--symmetric', '--cipher-algo', 'AES256',
         '--passphrase-fd', '0', '--output', str(out_path), tmp
     ]
     p = subprocess.run(cmd, input=(passphrase + "\n").encode(),
@@ -248,7 +248,7 @@ def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str) -> b
 def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str) -> bytes:
     if not vault_path.exists():
         return b''
-    cmd = [GPG_BIN, '--batch', '--yes', '--decrypt',
+    cmd = [GPG_BIN, '--batch', '--yes', '--pinentry-mode', 'loopback', '--decrypt',
            '--passphrase-fd', '0', str(vault_path)]
     p = subprocess.run(cmd, input=(passphrase + "\n").encode(),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
