@@ -225,25 +225,65 @@ def aesgcm_decrypt(nonce: bytes, ct: bytes, key: bytes) -> bytes:
 
 # -------------- GPG wrappers --------------
 def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str) -> bool:
-    with tempfile.NamedTemporaryFile(delete=False) as tf:
-        tf.write(plain_bytes)
-        tf.flush()
-        tmp = tf.name
-    cmd = [
-        GPG_BIN, '--batch', '--yes', '--pinentry-mode', 'loopback', '--symmetric', '--cipher-algo', 'AES256',
-        '--passphrase-fd', '0', '--output', str(out_path), tmp
-    ]
-    p = subprocess.run(cmd, input=(passphrase + "\n").encode(),
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    """
+    Encrypta os bytes usando gpg simétrico. Usa mkstemp + chmod 0o600 para
+    diminuir janela de exposição do plaintext no filesystem e tenta sobrescrever
+    o arquivo temporário antes de removê-lo (melhor esforço).
+    """
+    fd, tmp = tempfile.mkstemp()
     try:
-        with open(tmp, 'wb') as f:
-            f.write(b'\x00' * len(plain_bytes))
-        os.unlink(tmp)
+        try:
+            # garantir permissões restritas (somente dono)
+            try:
+                os.fchmod(fd, 0o600)
+            except Exception:
+                # em alguns sistemas fchmod pode falhar — tenta chmod no caminho
+                try:
+                    os.chmod(tmp, 0o600)
+                except Exception:
+                    pass
+
+            # escrever os bytes plaintext e fechar o descritor (com fdopen)
+            with os.fdopen(fd, 'wb') as tf:
+                tf.write(plain_bytes)
+                tf.flush()
+
+            # preparar comando gpg (usa loopback para aceitar passphrase via stdin)
+            cmd = [
+                GPG_BIN, '--batch', '--yes', '--pinentry-mode', 'loopback',
+                '--symmetric', '--cipher-algo', 'AES256',
+                '--passphrase-fd', '0', '--output', str(out_path), tmp
+            ]
+            p = subprocess.run(cmd, input=(passphrase + "\n").encode(),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # verificar retorno do gpg
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.decode(errors='ignore').strip())
+
+            return True
+        finally:
+            # tentativa melhor-esforço de sobrescrever e remover o arquivo temporário
+            try:
+                # reabrir e sobrescrever com zeros — só se o arquivo existir
+                with open(tmp, 'r+b') as f:
+                    f.seek(0)
+                    f.write(b'\x00' * os.path.getsize(tmp))
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                pass
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
     except Exception:
-        pass
-    if p.returncode != 0:
-        raise RuntimeError(p.stderr.decode(errors='ignore').strip())
-    return True
+        # garantir que o descritor não fique aberto caso exceção ocorra antes do fdopen
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        raise
 
 def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str) -> bytes:
     if not vault_path.exists():
