@@ -67,6 +67,8 @@ BACKUP_KEEP = int(os.getenv("VAULT_BACKUP_KEEP", "5"))
 AUTO_DICA_LEN = int(os.getenv("VAULT_AUTO_DICA_LEN", "24"))
 CLIPBOARD_TIMEOUT = int(os.getenv("VAULT_CLIP_TIMEOUT", "30"))
 
+SEPARATOR = "\x1e"
+
 # ---------------- helpers ----------------
 _ANSI_ESC_RE = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]|\x1B\[[0-9;]*[A-Za-z]')
 
@@ -433,7 +435,7 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
         return
     # extras interativo
     extras = prompt_extras_interactive()
-    combined = k1 + "|" + k2
+    combined = k1 + SEPARATOR + k2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
     # pack secret + extras into JSON bytes, then encrypt
@@ -481,7 +483,7 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     salt = binascii.unhexlify(entry["data"]["salt"])
     nonce = binascii.unhexlify(entry["data"]["nonce"])
     ct = base64.b64decode(entry["data"]["cipher_b64"])
-    combined = v1 + "|" + v2
+    combined = v1 + SEPARATOR + v2
     derived = derive_key(combined, salt)
     try:
         plaintext = aesgcm_decrypt(nonce, ct, derived)
@@ -555,7 +557,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         salt = binascii.unhexlify(data["salt"])
         nonce = binascii.unhexlify(data["nonce"])
         ct = base64.b64decode(data["cipher_b64"])
-        derived = derive_key(v1 + "|" + v2, salt)
+        derived = derive_key(v1 + SEPARATOR + v2, salt)
         plaintext = aesgcm_decrypt(nonce, ct, derived)
         secret_old, extras_old = _unpack_secret_and_extras(plaintext)
     except Exception:
@@ -582,7 +584,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         new_extras = prompt_extras_interactive(existing=extras_old)
     else:
         new_extras = extras_old or {}
-    combined = new_v1 + "|" + new_v2
+    combined = new_v1 + SEPARATOR + new_v2
     salt = secrets.token_bytes(SALT_LEN)
     derived = derive_key(combined, salt)
     payload_bytes = _pack_secret_and_extras(new_secret, new_extras)
@@ -864,7 +866,7 @@ def cli_mode(args: argparse.Namespace) -> None:
                 want = safe_input("Deseja adicionar extras (nota, totp, etc.)? (s/N): ").lower() == "s"
                 if want:
                     extras = prompt_extras_interactive()
-            combined = k1 + "|" + k2
+            combined = k1 + SEPARATOR + k2
             salt = secrets.token_bytes(SALT_LEN)
             derived = derive_key(combined, salt)
             payload_bytes = _pack_secret_and_extras(secret, extras)
@@ -896,7 +898,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             ct = base64.b64decode(entry["data"]["cipher_b64"])
             dica1_val = maybe_b64decode(args.dica1)
             dica2_val = maybe_b64decode(args.dica2)
-            combined = (dica1_val or "") + "|" + (dica2_val or "")
+            combined = (dica1_val or "") + SEPARATOR + (dica2_val or "")
             derived = derive_key(combined, salt)
             try:
                 plaintext = aesgcm_decrypt(nonce, ct, derived)
