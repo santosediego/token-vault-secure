@@ -4,11 +4,23 @@ Cofre local para armazenamento seguro de credenciais, tokens, chaves de API e ou
 
 O projeto foi desenvolvido como estudo de criptografia aplicada, gerenciamento seguro de segredos e desenvolvimento de aplicações de linha de comando em Python.
 
-Diferente de gerenciadores de senhas tradicionais, cada registro armazenado possui sua própria camada de proteção criptográfica, baseada em informações independentes de recuperação definidas no momento da criação.
+Diferente de muitos gerenciadores de senhas tradicionais, cada registro pode possuir uma camada adicional de proteção criptográfica baseada em informações independentes de recuperação.
+
+O objetivo não é substituir soluções consolidadas do mercado, mas explorar um modelo de compartimentalização de segredos onde o acesso ao cofre não implica necessariamente acesso imediato a todas as informações armazenadas.
 
 ---
 
-## ✨ Características
+# 🎯 Ideia Principal
+
+A proposta do projeto é permitir que o usuário compartimentalize seus segredos.
+
+Mesmo que a senha mestra do cofre seja conhecida, cada registro exige informações adicionais independentes para sua recuperação.
+
+Essas informações podem ser armazenadas separadamente, reduzindo a dependência de um único fator de acesso e dificultando a exposição completa do conteúdo do cofre.
+
+---
+
+# ✨ Características
 
 * Interface em linha de comando (CLI)
 * Menu interativo para uso simplificado
@@ -18,33 +30,53 @@ Diferente de gerenciadores de senhas tradicionais, cada registro armazenado poss
 * Backups automáticos e manuais
 * Troca de senha mestra
 * Limpeza automática da área de transferência após recuperação de segredos
-* Suporte a campos adicionais (extras) para cada registro
+* Suporte a campos adicionais (extras)
 * Recuperação e restauração de backups
-* Geração automática de chaves auxiliares
+* Geração automática de informações auxiliares de recuperação
 
 ---
 
-## 🏗️ Arquitetura de Proteção
+# 🏗️ Arquitetura de Proteção
 
 O sistema utiliza múltiplas camadas de proteção para reduzir pontos únicos de falha.
 
-### Camada 1 — Cofre Principal
+## Fluxo Simplificado
+
+```text
+Senha Mestra
+      ↓
+Vault protegido por GPG
+      ↓
+Registro selecionado
+      ↓
+Dica 1 + Dica 2
+      ↓
+Derivação de chave (Argon2/PBKDF2)
+      ↓
+AES-GCM
+      ↓
+Segredo recuperado
+```
+
+Cada registro exige suas próprias informações de recuperação para derivação da chave utilizada na descriptografia.
+
+## Camada 1 — Cofre Principal
 
 Todo o conteúdo do cofre é armazenado em um arquivo criptografado utilizando GPG.
 
 O acesso ao arquivo requer a senha mestra definida pelo usuário.
 
-### Camada 2 — Proteção Individual por Registro
+## Camada 2 — Proteção Individual por Registro
 
 Cada segredo armazenado possui sua própria chave criptográfica derivada a partir de duas informações independentes de recuperação.
 
 Essas informações são utilizadas para gerar uma chave exclusiva através de Argon2 (ou PBKDF2 como fallback), protegendo individualmente cada registro.
 
-Dessa forma, o acesso ao arquivo do cofre não implica necessariamente acesso aos segredos armazenados.
+Mesmo com acesso ao arquivo do cofre, ainda é necessário conhecer as informações utilizadas para derivação da chave daquele registro específico.
 
 ---
 
-## 📦 Estrutura dos Dados
+# 📦 Estrutura dos Dados
 
 Cada registro contém:
 
@@ -61,11 +93,13 @@ Exemplos de uso dos campos extras:
 * URLs de serviços
 * Informações complementares de autenticação
 
+> 💡 Por padrão, o sistema gera automaticamente as informações de recuperação utilizadas pela segunda camada de proteção. Recomenda-se utilizar essa geração automática sempre que possível, evitando valores previsíveis como datas, nomes ou palavras comuns.
+
 ---
 
-## 🖥️ Modos de Utilização
+# 🖥️ Modos de Utilização
 
-### Modo Interativo
+## Modo Interativo
 
 Executa a interface baseada em menu.
 
@@ -95,9 +129,7 @@ Escolha uma opção:
 
 Este modo é indicado para uso cotidiano, dispensando a memorização de comandos.
 
----
-
-### Modo CLI
+## Modo CLI
 
 Também é possível utilizar o sistema diretamente por linha de comando.
 
@@ -107,7 +139,7 @@ Listar registros:
 python3 token_vault_secure.py list
 ```
 
-Adicionar novo registro:
+Adicionar registro:
 
 ```bash
 python3 token_vault_secure.py add github
@@ -133,12 +165,16 @@ python3 token_vault_secure.py changepass
 
 ---
 
-## 🔧 Requisitos
+# 📥 Instalação
 
-* Python 3.12+
-* GPG instalado e disponível no PATH
+Clone o repositório:
 
-Dependências Python:
+```bash
+git clone https://github.com/santosediego/token-vault-secure.git
+cd token-vault-secure
+```
+
+Instale as dependências obrigatórias:
 
 ```bash
 pip install cryptography
@@ -151,7 +187,20 @@ pip install argon2-cffi
 pip install pyperclip
 ```
 
-### Bibliotecas Utilizadas
+Verifique se o GPG está disponível:
+
+```bash
+gpg --version
+```
+
+---
+
+# 🔧 Requisitos
+
+* Python 3.12+
+* GPG instalado e disponível no PATH
+
+## Bibliotecas Utilizadas
 
 * cryptography
 * argon2-cffi (opcional)
@@ -160,17 +209,34 @@ pip install pyperclip
 
 ---
 
-## 💾 Backups
+# 🔧 Solução de Problemas
+
+## GPG recusando a passphrase
+
+O cofre utiliza `--pinentry-mode loopback` para fornecer a senha mestra diretamente ao GPG.
+
+Caso receba erros relacionados a pinentry, habilite o suporte a loopback:
+
+```bash
+echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+gpgconf --kill gpg-agent
+```
+
+Após reiniciar o agente, tente executar novamente o programa.
+
+---
+
+# 💾 Backups
 
 O sistema realiza backups automáticos antes de operações críticas.
 
 Também é possível criar backups manuais através do menu ou da CLI.
 
-Os backups preservam a mesma proteção criptográfica do cofre principal.
+Os backups preservam a mesma proteção criptográfica aplicada ao cofre principal.
 
 ---
 
-## 🔐 Considerações de Segurança
+# 🔐 Considerações de Segurança
 
 O projeto utiliza primitivas criptográficas amplamente adotadas pela indústria:
 
@@ -179,7 +245,7 @@ O projeto utiliza primitivas criptográficas amplamente adotadas pela indústria
 * PBKDF2 como mecanismo de compatibilidade
 * GPG para proteção do arquivo principal
 
-Algumas medidas adicionais implementadas:
+Medidas adicionais implementadas:
 
 * Nonces aleatórios para cada operação de criptografia
 * Salts independentes por registro
@@ -188,9 +254,37 @@ Algumas medidas adicionais implementadas:
 * Backups rotativos
 * Separação entre proteção do cofre e proteção dos registros
 
+## Modelo de Ameaças
+
+Este projeto busca oferecer proteção contra cenários como:
+
+* Vazamento acidental do arquivo do cofre
+* Acesso indevido ao armazenamento local
+* Exposição da senha mestra sem conhecimento das informações de recuperação dos registros
+* Comprometimento de um registro sem impacto direto sobre os demais
+
+Não foi projetado para resistir a:
+
+* Sistemas comprometidos por malware
+* Keyloggers
+* Captura de memória em tempo real
+* Ataques físicos avançados ao equipamento
+
 ---
 
-## 🎯 Objetivos do Projeto
+# 🚧 Limitações Conhecidas
+
+Nenhuma implementação é perfeita, e é importante deixar claros os limites desta solução.
+
+* A limpeza de memória em Python não é garantida.
+* Strings em Python são imutáveis e podem permanecer em memória por algum tempo após o uso.
+* A sobrescrita de arquivos temporários é realizada em modo melhor-esforço e não garante remoção física definitiva em SSDs ou sistemas com journaling.
+* A segurança da segunda camada depende da qualidade das informações utilizadas para derivação das chaves.
+* O projeto não passou por auditoria independente de segurança.
+
+---
+
+# 🎯 Objetivos do Projeto
 
 Este projeto foi criado principalmente para estudo e experimentação nas áreas de:
 
@@ -203,12 +297,12 @@ Este projeto foi criado principalmente para estudo e experimentação nas áreas
 
 ---
 
-## ⚠️ Aviso
+# ⚠️ Aviso
 
-Este projeto foi desenvolvido para fins educacionais e uso pessoal.
+Este projeto foi desenvolvido para fins educacionais, experimentação técnica e uso pessoal.
 
-Embora utilize bibliotecas criptográficas consolidadas e práticas modernas de proteção de dados, ele não passou por auditoria profissional independente.
+Embora utilize bibliotecas criptográficas amplamente adotadas e práticas modernas de proteção de dados, ele não passou por auditoria profissional independente.
 
-Não substitui soluções amplamente auditadas e consolidadas como KeePassXC, Bitwarden ou Password Store.
+Para ambientes corporativos, requisitos regulatórios ou armazenamento de informações críticas, recomenda-se a utilização de soluções amplamente auditadas e consolidadas, como KeePassXC, Bitwarden ou Password Store.
 
 Utilize por sua própria conta e risco.
