@@ -745,7 +745,7 @@ def type_effect(text: str, delay: float = 0.02, newline: bool = True) -> None:
     if newline:
         print()
 
-def print_banner(title: str = "Token Vault Secure", version: str = "") -> None:
+def print_banner(title: str = "Token Vault Secure") -> None:
     frases = [
         "A segurança começa na simplicidade.",
         "Sem distrações, só propósito.",
@@ -754,7 +754,7 @@ def print_banner(title: str = "Token Vault Secure", version: str = "") -> None:
         "Feito por quem gosta de ver as engrenagens girarem."
     ]
     use_color = False
-    t = f"{title} {version}"
+    t = title
     width = 60
     pad = (width - len(t)) // 2
     top = " " * pad + t + " " * (width - len(t) - pad)
@@ -778,7 +778,7 @@ def menu_loop() -> None:
         return
     while True:
         clear_screen()
-        print_banner("Token Vault Secure", "v0.6.0")
+        print_banner("Token Vault Secure")
         print("\nEscolha uma opção:")
         print("1 - Adicionar alias")
         print("2 - Recuperar alias")
@@ -840,9 +840,8 @@ def parse_args() -> argparse.Namespace:
     sub.add_parser("restore", help="Restaurar um backup existente")
     # Change master password
     sub.add_parser("changepass", help="Alterar a senha mestra do cofre")
-    # Menu and version
+    # Menu
     sub.add_parser("menu", help="Iniciar no modo interativo")
-    parser.add_argument("--version", action="store_true", help="Exibe versão")
     return parser.parse_args()
 
 def cli_mode(args: argparse.Namespace) -> None:
@@ -961,9 +960,6 @@ def check_dependencies() -> None:
 def main() -> None:
     check_dependencies()  # fail fast
     args = parse_args()
-    if getattr(args, "version", False):
-        print("Token Vault Secure - v0.6.0")
-        return
     if not args.command or args.command == "menu":
         try:
             menu_loop()
