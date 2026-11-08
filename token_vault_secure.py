@@ -529,21 +529,21 @@ def _unpack_secret_and_extras(plaintext_bytes: bytes) -> Tuple[str, Dict[str, st
     return (text, {})
 
 def op_add(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Adicionar novo alias ---")
-    alias = safe_input("Alias (nome identificador): ", maxlen=120)
+    print("\n--- Novo registro ---")
+    alias = safe_input("Nome do registro (ex.: servidor-a): ", maxlen=120)
     if not alias or not is_valid_alias(alias):
         print("Nome inválido. Use letras, números, espaço e os símbolos - _ @ .")
         return
     if alias in vault:
-        print("Já existe um registro com esse alias.")
+        print("Já existe um registro com esse nome.")
         return
     dica1_name = safe_input("Dica 1 (descrição): ", maxlen=120)
     dica2_name = safe_input("Dica 2 (descrição): ", maxlen=120)
     k1 = sanitize_text(safe_input("Valor Dica 1 (Enter p/ gerar): ")) or gen_dica_auto()
     k2 = sanitize_text(safe_input("Valor Dica 2 (Enter p/ gerar): ")) or gen_dica_auto()
-    secret = getpass.getpass("Senha / secret: ")
+    secret = getpass.getpass("Segredo (senha, token, chave de API): ")
     if not secret:
-        print("Senha vazia; abortando.")
+        print("Segredo vazio; abortando.")
         return
     # extras interativo
     extras = prompt_extras_interactive()
@@ -559,7 +559,7 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     create_backup("bak")
     vault[alias] = entry
     save_vault(vault, passphrase)
-    print("\nADICIONADO:", alias)
+    print("\nRegistro criado:", alias)
     print(f"[{entry['meta']['dica1_name']}]: {k1}")
     print(f"[{entry['meta']['dica2_name']}]: {k2}")
     if extras:
@@ -573,8 +573,8 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     gc.collect()
 
 def op_get(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Recuperar alias ---")
-    alias = safe_input("Alias: ", maxlen=120)
+    print("\n--- Abrir registro ---")
+    alias = safe_input("Nome do registro: ", maxlen=120)
     if alias not in vault:
         print("Registro não encontrado.")
         return
@@ -587,8 +587,8 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     try:
         plaintext = decrypt_entry(entry, v1, v2)
         secret, extras = _unpack_secret_and_extras(plaintext)
-        print(f"\nAlias: {alias}")
-        print(f"Senha: {secret}")
+        print(f"\nRegistro: {alias}")
+        print(f"Segredo: {secret}")
         if extras:
             print("\nExtras:")
             for k, val in extras.items():
@@ -607,7 +607,7 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
         gc.collect()
 
 def op_list(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Aliases cadastrados ---")
+    print("\n--- Registros cadastrados ---")
     if not vault:
         print("(nenhum registro)")
         return
@@ -615,15 +615,15 @@ def op_list(vault: Dict[str, Any], passphrase: str) -> None:
         print("-", k)
 
 def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Excluir alias ---")
-    alias = safe_input("Alias: ", maxlen=120)
+    print("\n--- Excluir registro ---")
+    alias = safe_input("Nome do registro: ", maxlen=120)
     if not alias:
-        print("É necessário informar um alias.")
+        print("É necessário informar o nome do registro.")
         return
     if alias not in vault:
         print("Registro não encontrado.")
         return
-    confirm = safe_input(f"Confirma remoção de '{alias}'? Digite o alias completo para confirmar: ", maxlen=120)
+    confirm = safe_input(f"Para confirmar a exclusão de '{alias}', digite o nome completo: ", maxlen=120)
     if confirm != alias:
         print("Confirmação incorreta. Abortando.")
         return
@@ -634,13 +634,13 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     except Exception as e:
         print("Erro ao salvar o cofre:", e)
         return
-    print("Removido com sucesso.")
+    print("Registro excluído.")
 
 def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Editar alias ---")
-    alias = safe_input("Alias: ", maxlen=120)
+    print("\n--- Editar registro ---")
+    alias = safe_input("Nome do registro: ", maxlen=120)
     if not alias:
-        print("É necessário informar um alias.")
+        print("É necessário informar o nome do registro.")
         return
     if alias not in vault:
         print("Registro não encontrado.")
@@ -661,10 +661,10 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         print("Dicas incorretas ou dados corrompidos. Abortando.")
         return
     print("\nValores atuais:")
-    print(f"Alias: {alias}")
+    print(f"Registro: {alias}")
     print(f"{d1_name}: {v1}")
     print(f"{d2_name}: {v2}")
-    print(f"Senha atual: {secret_old}")
+    print(f"Segredo atual: {secret_old}")
     if extras_old:
         print("Extras atuais:")
         for k, val in extras_old.items():
@@ -674,7 +674,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     new_d2_name = safe_input(f"Novo nome para [{d2_name}]: ", maxlen=120) or d2_name
     new_v1 = safe_input(f"Novo valor para [{new_d1_name}]: ") or v1
     new_v2 = safe_input(f"Novo valor para [{new_d2_name}]: ") or v2
-    new_secret = getpass.getpass("Nova senha (Enter para manter): ") or secret_old
+    new_secret = getpass.getpass("Novo segredo (Enter para manter): ") or secret_old
     # editar extras?
     edit_extras = safe_input("Editar extras? (s/N): ").lower() == "s"
     if edit_extras:
@@ -698,7 +698,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     except Exception as e:
         print("Erro ao salvar alterações:", e)
         return
-    print("\nAlias atualizado com sucesso.")
+    print("\nRegistro atualizado com sucesso.")
     print(f"[{entry['meta']['dica1_name']}]: {new_v1}")
     print(f"[{entry['meta']['dica2_name']}]: {new_v2}")
     print("Anote novamente esses valores.")
@@ -867,33 +867,35 @@ def menu_loop() -> None:
         print_banner("Token Vault Secure")
         print(f"Cofre: {VAULT_PATH}")
         print("\nEscolha uma opção:")
-        print("1 - Adicionar alias")
-        print("2 - Recuperar alias")
-        print("3 - Editar alias")
-        print("4 - Excluir alias")
-        print("5 - Listar aliases")
-        print("6 - Backup manual")
-        print("7 - Trocar senha mestra")
-        print("8 - Restaurar backup")
-        print("99 - Sair")
-        opt = input("Opção: ").strip()
+        print("\nRegistros")
+        print("  1 - Listar")
+        print("  2 - Abrir")
+        print("  3 - Novo")
+        print("  4 - Editar")
+        print("  5 - Excluir")
+        print("\nCofre")
+        print("  6 - Criar backup agora")
+        print("  7 - Restaurar backup")
+        print("  8 - Trocar senha mestra")
+        print("\n  0 - Sair")
+        opt = input("\nOpção: ").strip()
         if opt == "1":
-            clear_screen(); op_add(vault, passphrase); pause()
+            clear_screen(); op_list(vault, passphrase); pause()
         elif opt == "2":
             clear_screen(); op_get(vault, passphrase); pause()
         elif opt == "3":
-            clear_screen(); op_edit(vault, passphrase); pause()
+            clear_screen(); op_add(vault, passphrase); pause()
         elif opt == "4":
-            op_delete(vault, passphrase); pause()
+            clear_screen(); op_edit(vault, passphrase); pause()
         elif opt == "5":
-            clear_screen(); op_list(vault, passphrase); pause()
+            op_delete(vault, passphrase); pause()
         elif opt == "6":
             op_backup(vault, passphrase); pause()
         elif opt == "7":
-            passphrase = op_change_master_password(vault, passphrase); pause()
-        elif opt == "8":
             clear_screen(); vault = op_restore(vault, passphrase); pause()
-        elif opt == "99":
+        elif opt == "8":
+            passphrase = op_change_master_password(vault, passphrase); pause()
+        elif opt == "0":
             type_effect("Saindo... até a próxima!", 0.02)
             break
         else:
@@ -915,22 +917,22 @@ def parse_args() -> argparse.Namespace:
     )
     # Add
     sub = parser.add_subparsers(dest="command")
-    add_p = sub.add_parser("add", help="Adicionar novo alias", parents=[common])
-    add_p.add_argument("alias")
+    add_p = sub.add_parser("add", help="Adicionar novo registro", parents=[common])
+    add_p.add_argument("nome")
     add_p.add_argument("--dica1", help="Descrição da primeiro dica (Chave gerada automaticamente)")
     add_p.add_argument("--dica2", help="Descrição da segunda dica (Chave gerada automaticamente)")
-    add_p.add_argument("--secret", help="Valor secreto")
+    add_p.add_argument("--segredo", help="Valor do segredo")
     add_p.add_argument("--extras-json", help="Extras em JSON (ex: '{\"totp\":\"JBS...\",\"nota\":\"...\"}')")
     #Get
-    get_p = sub.add_parser("get", help="Recuperar alias existente", parents=[common])
-    get_p.add_argument("alias")
+    get_p = sub.add_parser("get", help="Abrir registro existente", parents=[common])
+    get_p.add_argument("nome")
     get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica")
     get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica")
     # List
-    sub.add_parser("list", help="Listar aliases armazenados", parents=[common])
+    sub.add_parser("list", help="Listar registros", parents=[common])
     # Delete
-    del_p = sub.add_parser("delete", help="Excluir um alias", parents=[common])
-    del_p.add_argument("alias")
+    del_p = sub.add_parser("delete", help="Excluir um registro", parents=[common])
+    del_p.add_argument("nome")
     # Backup and restore
     sub.add_parser("backup", help="Gera um backup manual", parents=[common])
     sub.add_parser("restore", help="Restaurar um backup existente", parents=[common])
@@ -962,11 +964,11 @@ def cli_mode(args: argparse.Namespace) -> None:
             if not vault:
                 print("Cofre vazio.")
                 return
-            print("\nAliases:")
+            print("\nRegistros:")
             for lbl in vault.keys():
                 print(f" - {lbl}")
         elif args.command == "add":
-            alias = sanitize_text(args.alias)
+            alias = sanitize_text(args.nome)
             dica1_name = args.dica1 if args.dica1 is not None else safe_input("Nome para Dica 1 (ou Enter para 'Dica 1'): ")
             if not dica1_name:
                 dica1_name = "Dica 1"
@@ -975,7 +977,7 @@ def cli_mode(args: argparse.Namespace) -> None:
                 dica2_name = "Dica 2"
             k1 = gen_dica_auto()
             k2 = gen_dica_auto()
-            secret = args.secret or getpass.getpass("Valor secreto: ")
+            secret = args.segredo or getpass.getpass("Segredo (senha, token, chave de API): ")
             # extras from CLI JSON
             extras = {}
             if getattr(args, "extras_json", None):
@@ -998,7 +1000,7 @@ def cli_mode(args: argparse.Namespace) -> None:
                 "data": encrypt_entry_data(payload_bytes, k1, k2)
             }
             save_vault(vault, passphrase)
-            print(f"\nADICIONADO: {alias}")
+            print(f"\nRegistro criado: {alias}")
             print(f"[{dica1_name}]: {k1}")
             print(f"[{dica2_name}]: {k2}")
             if extras:
@@ -1010,7 +1012,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             secret = None; payload_bytes = None
             gc.collect()
         elif args.command == "get":
-            alias = args.alias
+            alias = args.nome
             entry = vault.get(alias)
             if not entry:
                 print("Registro não encontrado.")
@@ -1018,7 +1020,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             try:
                 plaintext = decrypt_entry(entry, args.dica1 or "", args.dica2 or "")
                 secret, extras = _unpack_secret_and_extras(plaintext)
-                print(f"\nValor decifrado: {secret}")
+                print(f"\nSegredo: {secret}")
                 if extras:
                     print("\nExtras:")
                     for k, v in extras.items():
@@ -1032,15 +1034,15 @@ def cli_mode(args: argparse.Namespace) -> None:
                 secret = None
                 gc.collect()
         elif args.command == "delete":
-            if args.alias not in vault:
-                print("Alias não encontrada.")
+            if args.nome not in vault:
+                print("Registro não encontrado.")
                 return
-            confirm = safe_input(f"Para confirmar a exclusão de '{args.alias}', digite o nome completo: ", maxlen=120)
-            if confirm != args.alias:
+            confirm = safe_input(f"Para confirmar a exclusão de '{args.nome}', digite o nome completo: ", maxlen=120)
+            if confirm != args.nome:
                 print("Confirmação incorreta. Abortando.")
                 return
             create_backup("bak")
-            del vault[args.alias]; save_vault(vault, passphrase); print("Excluído com sucesso.")
+            del vault[args.nome]; save_vault(vault, passphrase); print("Registro excluído.")
         elif args.command == "backup":
             op_backup(vault, passphrase)
         elif args.command == "restore":
