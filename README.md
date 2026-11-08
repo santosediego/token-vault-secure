@@ -11,7 +11,7 @@
 
 Cofre local para guardar credenciais, tokens, chaves de API e outras informações sensíveis, desenvolvido como estudo de criptografia aplicada e de aplicações CLI em Python.
 
-Cada registro tem uma segunda camada de proteção, com chave derivada de duas informações independentes (as "dicas"). Conhecer a senha mestra não dá acesso aos segredos, e as dicas podem ficar guardadas em lugares separados.
+Cada registro tem uma segunda camada de proteção, com chave derivada de dois códigos independentes. Conhecer a senha mestra não dá acesso aos segredos, e os códigos podem ficar guardados em lugares separados.
 
 O objetivo não é substituir soluções consolidadas, mas explorar a compartimentalização de segredos.
 
@@ -27,7 +27,7 @@ O objetivo não é substituir soluções consolidadas, mas explorar a compartime
 * Backups automáticos e manuais, com restauração
 * Troca de senha mestra
 * Limpeza automática da área de transferência após recuperação de segredos
-* Suporte a campos adicionais (extras)
+* Campos adicionais em cada registro (usuário, URL, TOTP, notas)
 
 ## Como funciona
 
@@ -40,7 +40,7 @@ Vault protegido por GPG
       ↓
 Registro selecionado
       ↓
-Dica 1 + Dica 2
+Código 1 + Código 2
       ↓
 Derivação de chave (Argon2/PBKDF2)
       ↓
@@ -55,7 +55,7 @@ Todo o conteúdo do cofre é armazenado em um arquivo criptografado com GPG. O a
 
 ### Camada 2 — Proteção individual por registro
 
-Cada segredo tem sua própria chave, derivada das duas dicas via Argon2id (ou PBKDF2 como alternativa). A chave não é guardada em lugar nenhum: mesmo com o cofre aberto, sem as dicas daquele registro não há como decifrá-lo.
+Cada segredo tem sua própria chave, derivada dos dois códigos via Argon2id (ou PBKDF2 como alternativa). A chave não é guardada em lugar nenhum: mesmo com o cofre aberto, sem os códigos daquele registro não há como decifrá-lo.
 
 O KDF e seus parâmetros ficam gravados no registro. Um registro criado com Argon2id só abre com o `argon2-cffi` instalado; sem ele, o programa avisa qual pacote falta.
 
@@ -63,15 +63,15 @@ O KDF e seus parâmetros ficam gravados no registro. Um registro criado com Argo
 
 Cada registro contém:
 
-* Alias identificador
-* Metadados de recuperação
+* Nome do registro
+* Lembretes dos dois códigos
 * Material criptográfico
-* Segredo principal
-* Campos adicionais opcionais (chaves TOTP, notas privadas, URLs de serviços, informações complementares de autenticação)
+* Segredo (senha, token, chave de API)
+* Campos adicionais opcionais (usuário, URL, chave TOTP, notas)
 
-> **Dica:** por padrão, o sistema gera automaticamente as informações de recuperação da segunda camada. Recomenda-se usar essa geração automática sempre que possível, evitando valores previsíveis como datas, nomes ou palavras comuns.
+> **Recomendação:** por padrão, o sistema gera os dois códigos automaticamente. Use essa geração sempre que possível, evitando valores previsíveis como datas, nomes ou palavras comuns. Os códigos são mostrados uma única vez, ao criar o registro: anote-os antes de continuar. Eles aceitam apenas caracteres ASCII (sem acentos).
 
-> **Nota:** o nome de cada dica aparece quando o registro é aberto (segunda camada). Escolha um lembrete que só faça sentido para você, como "dica do servidor A", e evite indicar onde a dica está guardada. Guarde cada dica em um lugar físico diferente.
+> **Nota:** o lembrete de cada código aparece quando o registro é aberto (segunda camada). Escolha um texto que só faça sentido para você, como "código do servidor A", e evite indicar onde o código está guardado. Guarde cada código em um lugar físico diferente.
 
 ## Instalação
 
@@ -134,15 +134,19 @@ Cofre: /home/usuario/.vault/vault.gpg
 
 Escolha uma opção:
 
-1 - Adicionar alias
-2 - Recuperar alias
-3 - Editar alias
-4 - Excluir alias
-5 - Listar aliases
-6 - Backup manual
-7 - Trocar senha mestra
-8 - Restaurar backup
-99 - Sair
+Registros
+  1 - Listar
+  2 - Abrir
+  3 - Novo
+  4 - Editar
+  5 - Excluir
+
+Cofre
+  6 - Criar backup agora
+  7 - Restaurar backup
+  8 - Trocar senha mestra
+
+  0 - Sair
 ```
 
 ### Modo CLI
@@ -161,7 +165,7 @@ Adicionar registro:
 python3 token_vault_secure.py add github
 ```
 
-Recuperar registro:
+Abrir registro (o programa pede os dois códigos):
 
 ```bash
 python3 token_vault_secure.py get github
@@ -179,7 +183,7 @@ Alterar senha mestra:
 python3 token_vault_secure.py changepass
 ```
 
-> **Atenção:** valores passados como argumento (`--secret` no `add`; `--dica1` e `--dica2` no `get`) ficam no histórico do shell e podem aparecer na lista de processos. Para segredos de verdade, prefira o modo interativo, que não deixa esses valores no histórico do shell.
+> **Atenção:** valores passados como argumento (`--segredo` no `add`; `--codigo1` e `--codigo2` no `get`) ficam no histórico do shell e podem aparecer na lista de processos. Para segredos de verdade, prefira o modo interativo, que não deixa esses valores no histórico do shell.
 
 ### Local do cofre
 
@@ -200,7 +204,7 @@ O sistema faz um backup automático antes das operações que alteram o cofre (a
 
 Recomenda-se guardar uma cópia dos backups em um local seguro.
 
-Perder o arquivo do cofre, ou qualquer uma das duas dicas de um registro, significa perder aquele segredo. Não existe recuperação.
+Perder o arquivo do cofre, ou qualquer um dos dois códigos de um registro, significa perder aquele segredo. Não existe recuperação.
 
 ## Segurança
 
@@ -221,7 +225,7 @@ Este projeto busca oferecer proteção contra cenários como:
 
 * Vazamento acidental do arquivo do cofre
 * Acesso indevido ao armazenamento local
-* Exposição da senha mestra sem conhecimento das informações de recuperação dos registros
+* Exposição da senha mestra sem conhecimento dos códigos dos registros
 * Comprometimento de um registro sem impacto direto sobre os demais
 
 Não foi projetado para resistir a:
@@ -235,7 +239,7 @@ Não foi projetado para resistir a:
 
 * A limpeza de memória em Python não é garantida: strings são imutáveis e podem permanecer em memória por algum tempo após o uso.
 * A sobrescrita de arquivos temporários é feita em modo melhor-esforço e não garante remoção física definitiva em SSDs ou sistemas com journaling.
-* A segurança da segunda camada depende da qualidade das informações usadas para derivar as chaves.
+* A segurança da segunda camada depende da qualidade dos códigos usados para derivar as chaves.
 * A senha recuperada é exibida no terminal e copiada para a área de transferência (que é limpa depois de 30 segundos).
 
 ## Solução de problemas
