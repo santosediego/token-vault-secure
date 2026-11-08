@@ -109,6 +109,7 @@ gpg --version
 * Python 3.12+
 * GPG instalado e disponível no PATH
 * `cryptography`, `argon2-cffi` e `pyperclip` (todos no `requirements.txt`)
+* Opcional, para copiar o segredo para a área de transferência no Linux: `xclip` ou `xsel` (X11), ou `wl-clipboard` (Wayland). Sem isso o programa avisa e só exibe o segredo na tela.
 
 > **Atenção:** mantenha o `argon2-cffi` instalado. Registros criados com Argon2id só abrem com ele; sem o pacote, novos registros passam a usar PBKDF2.
 

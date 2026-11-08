@@ -268,15 +268,19 @@ def normalize_codigo(value: Optional[str]) -> str:
     interativo/CLI) para o mesmo código gerar sempre a mesma chave."""
     return sanitize_text(value or "")
 
-def read_codigo_novo(prompt: str) -> str:
+def read_codigo_novo(prompt: str, if_empty: str) -> str:
     """Lê um código digitado ao CRIAR ou EDITAR. Os códigos aceitam só ASCII
     visível; avisa se algo foi descartado (senão o código ficaria mais fraco
-    em silêncio)."""
+    em silêncio). `if_empty` diz o que acontece se nada sobrar."""
     raw = input(prompt)
     val = normalize_codigo(raw)
     if val != ' '.join(raw.split()):
-        print("(Aviso: os códigos aceitam só caracteres ASCII visíveis, sem acentos; "
-              "os demais foram descartados.)")
+        if val:
+            print("(Aviso: os códigos aceitam só caracteres ASCII visíveis, sem acentos; "
+                  "os demais foram descartados.)")
+        else:
+            print("(Aviso: os códigos aceitam só caracteres ASCII visíveis, sem acentos. "
+                  f"Nada do que você digitou pôde ser usado; {if_empty}.)")
     return val
 
 def _combined_from_codigos(d1: str, d2: str) -> str:
@@ -582,9 +586,11 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\nO segredo será protegido por dois códigos. Cada código tem um lembrete,")
     print("que aparece na hora de abrir o registro.\n")
     lembrete1 = safe_input('Lembrete do código 1 (ex.: "código do servidor A"): ', maxlen=120, keep_unicode=True) or DEFAULT_LEMBRETES[0]
-    k1 = read_codigo_novo("Código 1 (Enter para gerar automaticamente, recomendado): ") or gen_codigo_auto()
+    k1 = read_codigo_novo("Código 1 (Enter para gerar automaticamente, recomendado): ",
+                            "será usado um código gerado automaticamente") or gen_codigo_auto()
     lembrete2 = safe_input("Lembrete do código 2: ", maxlen=120, keep_unicode=True) or DEFAULT_LEMBRETES[1]
-    k2 = read_codigo_novo("Código 2 (Enter para gerar automaticamente, recomendado): ") or gen_codigo_auto()
+    k2 = read_codigo_novo("Código 2 (Enter para gerar automaticamente, recomendado): ",
+                            "será usado um código gerado automaticamente") or gen_codigo_auto()
     secret = getpass.getpass("Segredo (senha, token, chave de API): ")
     if not secret:
         print("Segredo vazio; abortando.")
@@ -719,9 +725,9 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
             print(f" - {k}: {val}")
     print("Deixe em branco para manter o valor atual.\n")
     new_d1_name = safe_input(f"Novo lembrete do código 1 [{d1_name}]: ", maxlen=120, keep_unicode=True) or d1_name
-    new_v1 = read_codigo_novo("Novo código 1: ") or v1
+    new_v1 = read_codigo_novo("Novo código 1: ", "o código atual será mantido") or v1
     new_d2_name = safe_input(f"Novo lembrete do código 2 [{d2_name}]: ", maxlen=120, keep_unicode=True) or d2_name
-    new_v2 = read_codigo_novo("Novo código 2: ") or v2
+    new_v2 = read_codigo_novo("Novo código 2: ", "o código atual será mantido") or v2
     new_secret = getpass.getpass("Novo segredo (Enter para manter): ") or secret_old
     # editar extras?
     edit_extras = safe_input("Editar campos adicionais? (s/N): ").lower() == "s"
