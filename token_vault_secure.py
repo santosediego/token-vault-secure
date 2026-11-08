@@ -73,14 +73,22 @@ SEPARATOR = "\x1e"
 _ANSI_ESC_RE = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]|\x1B\[[0-9;]*[A-Za-z]')
 
 def ensure_vault_dir() -> None:
-    if not VAULT_DIR.exists():
-        VAULT_DIR.mkdir(mode=0o700, parents=True)
-    else:
-        # garante permissões minimamente seguras
-        try:
-            VAULT_DIR.chmod(0o700)
-        except Exception:
-            pass
+    """Cria a pasta do cofre se não existir. Só aplica chmod 700 na pasta pelo programa."""
+    if VAULT_DIR.exists():
+        return
+    VAULT_DIR.mkdir(mode=0o700, parents=True)
+    try:
+        VAULT_DIR.chmod(0o700)
+    except Exception:
+        pass
+
+def _chmod_private(path: Path) -> None:
+    """Deixa o arquivo legível só pelo dono (melhor esforço; no-op no Windows
+    e em pendrive FAT/exFAT)."""
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
 
 def _now_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -356,7 +364,7 @@ def _gpg_decrypt_to_bytes(vault_path: Path, passphrase: str) -> bytes:
 
 # -------------- vault IO --------------
 def load_vault(passphrase: str) -> Dict[str, Any]:
-    ensure_vault_dir()
+    # leitura não cria pasta nenhuma: cofre inexistente = cofre vazio
     if not VAULT_PATH.exists():
         return {}
     raw = _gpg_decrypt_to_bytes(VAULT_PATH, passphrase)
@@ -365,7 +373,9 @@ def load_vault(passphrase: str) -> Dict[str, Any]:
 def save_vault(vobj: Dict[str, Any], passphrase: str) -> bool:
     ensure_vault_dir()
     plain = json.dumps(vobj, ensure_ascii=False, indent=2).encode('utf-8')
-    return _gpg_encrypt_bytes(plain, VAULT_PATH, passphrase)
+    ok = _gpg_encrypt_bytes(plain, VAULT_PATH, passphrase)
+    _chmod_private(VAULT_PATH)
+    return ok
 
 def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
     """
@@ -378,6 +388,7 @@ def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
     bak = VAULT_PATH.parent / f"{prefix}.{ts}"
     with open(VAULT_PATH, 'rb') as fsrc, open(bak, 'wb') as fdst:
         fdst.write(fsrc.read())
+    _chmod_private(bak)
     # prune older
     backups = sorted(VAULT_PATH.parent.glob(f"{prefix}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in backups[BACKUP_KEEP:]:
@@ -653,7 +664,6 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_backup(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Backup manual do vault ---")
-    ensure_vault_dir()
     if not VAULT_PATH.exists():
         print("Vault não existe. Nada a exportar.")
         return
@@ -708,13 +718,16 @@ def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
         try:
             with open(VAULT_PATH, 'rb') as fsrc, open(tmp_save, 'wb') as fdst:
                 fdst.write(fsrc.read())
+            _chmod_private(tmp_save)
             print(f"Cópia do vault atual salva em: {tmp_save.name}")
         except Exception as e:
             print("Falha ao salvar cópia do vault atual:", e)
             return vault
     try:
+        ensure_vault_dir()
         with open(chosen, 'rb') as fsrc, open(VAULT_PATH, 'wb') as fdst:
             fdst.write(fsrc.read())
+        _chmod_private(VAULT_PATH)
     except Exception as e:
         print("Erro ao restaurar arquivo:", e)
         return vault
