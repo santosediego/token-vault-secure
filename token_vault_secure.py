@@ -50,8 +50,39 @@ except Exception:
 
 # ---------------- CONFIG (centralizado) ----------------
 HOME = Path.home()
-VAULT_DIR = Path(os.getenv("VAULT_DIR", HOME / ".vault"))
-VAULT_PATH = Path(os.getenv("VAULT_PATH", VAULT_DIR / "vault.gpg"))
+DEFAULT_VAULT_NAME = "vault.gpg"
+
+def resolve_vault_path(raw: Optional[str] = None) -> Path:
+    """
+    Descobre onde fica o arquivo do cofre. Prioridade:
+      1) `raw` (flag --vault)
+      2) variável de ambiente VAULT_PATH
+      3) variável de ambiente VAULT_DIR  (+ vault.gpg)
+      4) ~/.vault/vault.gpg
+    Se o caminho for uma pasta (existente, ou terminado em / ou \\), o arquivo
+    vault.gpg é criado dentro dela. A pasta do cofre é sempre a pasta do arquivo.
+    """
+    if not raw:
+        raw = os.getenv("VAULT_PATH")
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_dir() or raw.endswith(("/", os.sep)):
+            p = p / DEFAULT_VAULT_NAME
+    else:
+        base = Path(os.getenv("VAULT_DIR") or (HOME / ".vault")).expanduser()
+        p = base / DEFAULT_VAULT_NAME
+    # abspath (e não resolve) para não seguir symlink do arquivo do cofre
+    return Path(os.path.abspath(p))
+
+VAULT_PATH = resolve_vault_path()
+VAULT_DIR = VAULT_PATH.parent
+
+def configure_vault_path(raw: Optional[str] = None) -> None:
+    """Reconfigura o local do cofre (usado após ler a flag --vault)."""
+    global VAULT_PATH, VAULT_DIR
+    VAULT_PATH = resolve_vault_path(raw)
+    VAULT_DIR = VAULT_PATH.parent
+
 GPG_BIN = os.getenv("GPG_BIN", "gpg")
 
 SALT_LEN = int(os.getenv("VAULT_SALT_LEN", "16"))
@@ -758,6 +789,7 @@ def pause() -> None:
 
 def header() -> None:
     print("Token Vault Secure - menu interativo")
+    print(f"Cofre: {VAULT_PATH}")
 
 def type_effect(text: str, delay: float = 0.02, newline: bool = True) -> None:
     for ch in text:
@@ -801,6 +833,7 @@ def menu_loop() -> None:
     while True:
         clear_screen()
         print_banner("Token Vault Secure")
+        print(f"Cofre: {VAULT_PATH}")
         print("\nEscolha uma opção:")
         print("1 - Adicionar alias")
         print("2 - Recuperar alias")
@@ -836,34 +869,43 @@ def menu_loop() -> None:
             pause()
 
 def parse_args() -> argparse.Namespace:
+    # Opções comuns: valem antes OU depois do subcomando
+    # (default=SUPPRESS evita o subparser sobrescrever o valor do parser principal)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--vault", metavar="CAMINHO", default=argparse.SUPPRESS,
+        help="Arquivo (ou pasta) do cofre. Padrão: variável VAULT_PATH, "
+             "senão ~/.vault/vault.gpg"
+    )
     parser = argparse.ArgumentParser(
-        description="Token Vault Secure — CLI ou modo interativo"
+        description="Token Vault Secure — CLI ou modo interativo",
+        parents=[common]
     )
     # Add
     sub = parser.add_subparsers(dest="command")
-    add_p = sub.add_parser("add", help="Adicionar novo alias")
+    add_p = sub.add_parser("add", help="Adicionar novo alias", parents=[common])
     add_p.add_argument("alias")
     add_p.add_argument("--dica1", help="Descrição da primeiro dica (Chave gerada automaticamente)")
     add_p.add_argument("--dica2", help="Descrição da segunda dica (Chave gerada automaticamente)")
     add_p.add_argument("--secret", help="Valor secreto")
     add_p.add_argument("--extras-json", help="Extras em JSON (ex: '{\"totp\":\"JBS...\",\"nota\":\"...\"}')")
     #Get
-    get_p = sub.add_parser("get", help="Recuperar alias existente")
+    get_p = sub.add_parser("get", help="Recuperar alias existente", parents=[common])
     get_p.add_argument("alias")
     get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica")
     get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica")
     # List
-    sub.add_parser("list", help="Listar aliases armazenados")
+    sub.add_parser("list", help="Listar aliases armazenados", parents=[common])
     # Delete
-    del_p = sub.add_parser("delete", help="Excluir um alias")
+    del_p = sub.add_parser("delete", help="Excluir um alias", parents=[common])
     del_p.add_argument("alias")
     # Backup and restore
-    sub.add_parser("backup", help="Gera um backup manual")
-    sub.add_parser("restore", help="Restaurar um backup existente")
+    sub.add_parser("backup", help="Gera um backup manual", parents=[common])
+    sub.add_parser("restore", help="Restaurar um backup existente", parents=[common])
     # Change master password
-    sub.add_parser("changepass", help="Alterar a senha mestra do cofre")
+    sub.add_parser("changepass", help="Alterar a senha mestra do cofre", parents=[common])
     # Menu
-    sub.add_parser("menu", help="Iniciar no modo interativo")
+    sub.add_parser("menu", help="Iniciar no modo interativo", parents=[common])
     return parser.parse_args()
 
 def cli_mode(args: argparse.Namespace) -> None:
@@ -982,6 +1024,7 @@ def check_dependencies() -> None:
 def main() -> None:
     check_dependencies()  # fail fast
     args = parse_args()
+    configure_vault_path(getattr(args, "vault", None))
     if not args.command or args.command == "menu":
         try:
             menu_loop()
