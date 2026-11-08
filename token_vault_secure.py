@@ -791,6 +791,24 @@ def header() -> None:
     print("Token Vault Secure - menu interativo")
     print(f"Cofre: {VAULT_PATH}")
 
+def ask_master_passphrase(prompt: str = "Senha mestra do cofre: ") -> Optional[str]:
+    """
+    Cofre existente: pede a senha mestra uma vez.
+    Cofre NOVO (arquivo ainda não existe): avisa onde será criado e pede a
+    senha duas vezes — um erro de digitação aqui trancaria o cofre para sempre,
+    e um --vault com caminho errado cairia silenciosamente num cofre novo.
+    Retorna None se a confirmação falhar.
+    """
+    if VAULT_PATH.exists():
+        return getpass.getpass(prompt)
+    print(f"Cofre novo — será criado em: {VAULT_PATH}")
+    p1 = getpass.getpass("Defina a senha mestra: ")
+    p2 = getpass.getpass("Confirme a senha mestra: ")
+    if not p1 or p1 != p2:
+        print("Senhas não conferem ou vazias.")
+        return None
+    return p1
+
 def type_effect(text: str, delay: float = 0.02, newline: bool = True) -> None:
     for ch in text:
         sys.stdout.write(ch)
@@ -824,7 +842,9 @@ def print_banner(title: str = "Token Vault Secure") -> None:
 # ---------------- menu / CLI ----------------
 def menu_loop() -> None:
     header()
-    passphrase = getpass.getpass("Passphrase do cofre (será solicitada): ")
+    passphrase = ask_master_passphrase("Passphrase do cofre: ")
+    if passphrase is None:
+        return
     try:
         vault = load_vault(passphrase)
     except Exception as e:
@@ -909,10 +929,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def cli_mode(args: argparse.Namespace) -> None:
+    # Só 'add' e 'restore' podem trabalhar com cofre que ainda não existe.
+    # Nos demais, um cofre ausente quase sempre é caminho errado em --vault.
+    if args.command not in ("add", "restore") and not VAULT_PATH.exists():
+        print(f"Cofre não encontrado em: {VAULT_PATH}")
+        print("Confira o caminho (--vault / VAULT_PATH) ou crie um com o comando 'add'.")
+        return
     try:
-        passphrase = getpass.getpass("Senha mestra do cofre: ")
+        passphrase = ask_master_passphrase()
     except KeyboardInterrupt:
         print("\nInterrompido. Saindo.")
+        return
+    if passphrase is None:
         return
     try:
         vault = load_vault(passphrase)
