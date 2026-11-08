@@ -200,20 +200,56 @@ def copy_with_timeout(text: str, timeout: int = CLIPBOARD_TIMEOUT) -> None:
         print(f"(Erro ao copiar para clipboard: {e})")
 
 # ---------- KDF & AES ----------
-def derive_key(combined: str, salt: bytes, length: int = DERIVED_KEY_LEN) -> bytes:
-    pwd = combined.encode('utf-8')
+class KdfUnavailable(RuntimeError):
+    """O KDF exigido pela entrada não está disponível nesta máquina
+    (ex.: entrada criada com Argon2id, mas 'argon2-cffi' não instalado).
+    Tem classe própria para NÃO ser engolida pelo 'except Exception' genérico
+    e virar a mensagem enganosa de 'dicas incorretas'."""
+
+def normalize_dica(value: Optional[str]) -> str:
+    """Normalização ÚNICA da dica. Usada em TODOS os caminhos (add/get,
+    interativo/CLI) para a mesma dica gerar sempre a mesma chave."""
+    return sanitize_text(value or "")
+
+def _combined_from_dicas(d1: str, d2: str) -> str:
+    return normalize_dica(d1) + SEPARATOR + normalize_dica(d2)
+
+def current_kdf_params() -> Dict[str, Any]:
+    """Descritor do KDF para NOVAS entradas, conforme o ambiente atual."""
     if USE_ARGON2:
-        return hash_secret_raw(
-            secret=pwd, salt=salt,
-            time_cost=ARGON2_TIME,
-            memory_cost=ARGON2_MEM,
-            parallelism=ARGON2_PAR,
-            hash_len=length, type=Type.ID
-        )
-    else:
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=length, salt=salt,
-                         iterations=PBKDF2_ITERS, backend=default_backend())
-        return kdf.derive(pwd)
+        return {"algo": "argon2id", "time": ARGON2_TIME, "mem": ARGON2_MEM,
+                "par": ARGON2_PAR, "len": DERIVED_KEY_LEN}
+    return {"algo": "pbkdf2-sha256", "iters": PBKDF2_ITERS, "len": DERIVED_KEY_LEN}
+
+def derive_key_with(combined: str, salt: bytes, kdf: Dict[str, Any]) -> bytes:
+    """Deriva a chave usando EXATAMENTE o KDF/params descritos em `kdf`."""
+    pwd = combined.encode('utf-8')
+    algo = kdf.get("algo")
+    length = int(kdf.get("len", DERIVED_KEY_LEN))
+    if algo == "argon2id":
+        if not USE_ARGON2:
+            raise KdfUnavailable(
+                "Esta entrada foi criada com Argon2id, mas o pacote 'argon2-cffi' "
+                "não está instalado nesta máquina. Rode: pip install argon2-cffi"
+            )
+        return hash_secret_raw(secret=pwd, salt=salt,
+                               time_cost=int(kdf["time"]), memory_cost=int(kdf["mem"]),
+                               parallelism=int(kdf["par"]), hash_len=length, type=Type.ID)
+    elif algo == "pbkdf2-sha256":
+        k = PBKDF2HMAC(algorithm=hashes.SHA256(), length=length, salt=salt,
+                       iterations=int(kdf["iters"]), backend=default_backend())
+        return k.derive(pwd)
+    raise KdfUnavailable(f"KDF desconhecido na entrada: {algo}")
+
+def _legacy_kdf_candidates() -> List[Dict[str, Any]]:
+    """KDFs a tentar em entradas ANTIGAS (sem campo 'kdf'). O AES-GCM é
+    autenticado, então uma chave errada falha limpo — dá pra tentar em ordem."""
+    cands: List[Dict[str, Any]] = []
+    if USE_ARGON2:
+        cands.append({"algo": "argon2id", "time": ARGON2_TIME, "mem": ARGON2_MEM,
+                      "par": ARGON2_PAR, "len": DERIVED_KEY_LEN})
+    cands.append({"algo": "pbkdf2-sha256", "iters": PBKDF2_ITERS, "len": DERIVED_KEY_LEN})
+    return cands
 
 def aesgcm_encrypt(plaintext: bytes, key: bytes) -> Tuple[bytes, bytes]:
     nonce = secrets.token_bytes(NONCE_LEN)
@@ -224,6 +260,39 @@ def aesgcm_encrypt(plaintext: bytes, key: bytes) -> Tuple[bytes, bytes]:
 def aesgcm_decrypt(nonce: bytes, ct: bytes, key: bytes) -> bytes:
     aes = AESGCM(key)
     return aes.decrypt(nonce, ct, associated_data=None)
+
+def encrypt_entry_data(payload_bytes: bytes, d1: str, d2: str) -> Dict[str, Any]:
+    """Cifra o payload de uma NOVA entrada e devolve o bloco 'data' completo,
+    JÁ com o descritor de KDF salvo."""
+    kdf = current_kdf_params()
+    salt = secrets.token_bytes(SALT_LEN)
+    derived = derive_key_with(_combined_from_dicas(d1, d2), salt, kdf)
+    nonce, ct = aesgcm_encrypt(payload_bytes, derived)
+    return {
+        "salt": binascii.hexlify(salt).decode(),
+        "nonce": binascii.hexlify(nonce).decode(),
+        "cipher_b64": base64.b64encode(ct).decode(),
+        "kdf": kdf,
+    }
+
+def decrypt_entry(entry: Dict[str, Any], d1: str, d2: str) -> bytes:
+    """Decifra o payload. Entrada nova: usa o 'kdf' salvo. Entrada antiga
+    (sem 'kdf'): tenta os candidatos — o GCM valida qual é o certo."""
+    data = entry["data"]
+    salt = binascii.unhexlify(data["salt"])
+    nonce = binascii.unhexlify(data["nonce"])
+    ct = base64.b64decode(data["cipher_b64"])
+    combined = _combined_from_dicas(d1, d2)
+    kdf = data.get("kdf")
+    if kdf:
+        return aesgcm_decrypt(nonce, ct, derive_key_with(combined, salt, kdf))
+    last_err: Optional[Exception] = None
+    for cand in _legacy_kdf_candidates():
+        try:
+            return aesgcm_decrypt(nonce, ct, derive_key_with(combined, salt, cand))
+        except Exception as e:
+            last_err = e
+    raise last_err if last_err else RuntimeError("Falha ao decifrar.")
 
 # -------------- GPG wrappers --------------
 def _gpg_encrypt_bytes(plain_bytes: bytes, out_path: Path, passphrase: str) -> bool:
@@ -435,19 +504,13 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
         return
     # extras interativo
     extras = prompt_extras_interactive()
-    combined = k1 + SEPARATOR + k2
-    salt = secrets.token_bytes(SALT_LEN)
-    derived = derive_key(combined, salt)
-    # pack secret + extras into JSON bytes, then encrypt
+    # pack secret + extras into JSON bytes, then encrypt (KDF fica gravado na entrada)
     payload_bytes = _pack_secret_and_extras(secret, extras)
-    nonce, ct = aesgcm_encrypt(payload_bytes, derived)
     entry = {
         "meta": {"dica1_name": dica1_name or "Dica1",
                  "dica2_name": dica2_name or "Dica2",
                  "created": _now_ts()},
-        "data": {"salt": binascii.hexlify(salt).decode(),
-                 "nonce": binascii.hexlify(nonce).decode(),
-                 "cipher_b64": base64.b64encode(ct).decode()}
+        "data": encrypt_entry_data(payload_bytes, k1, k2)
     }
     # backup + salvar
     create_backup("vault.gpg.bak")
@@ -463,8 +526,6 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     copy_with_timeout(secret)
     # tentar reduzir exposição
     secret = None
-    derived = None
-    combined = None
     payload_bytes = None
     gc.collect()
 
@@ -480,13 +541,8 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     d2_name = meta.get("dica2_name", "Dica2")
     v1 = safe_input(f"Digite [{d1_name}]: ")
     v2 = safe_input(f"Digite [{d2_name}]: ")
-    salt = binascii.unhexlify(entry["data"]["salt"])
-    nonce = binascii.unhexlify(entry["data"]["nonce"])
-    ct = base64.b64decode(entry["data"]["cipher_b64"])
-    combined = v1 + SEPARATOR + v2
-    derived = derive_key(combined, salt)
     try:
-        plaintext = aesgcm_decrypt(nonce, ct, derived)
+        plaintext = decrypt_entry(entry, v1, v2)
         secret, extras = _unpack_secret_and_extras(plaintext)
         print(f"\nAlias: {alias}")
         print(f"Senha: {secret}")
@@ -495,12 +551,12 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
             for k, val in extras.items():
                 print(f" - {k}: {val}")
         copy_with_timeout(secret)
+    except KdfUnavailable as e:
+        print(f"\n{e}")
     except Exception:
         print("Dicas incorretas ou dados corrompidos.")
     finally:
         # reduzir exposição
-        derived = None
-        combined = None
         try:
             secret = None
         except Exception:
@@ -548,18 +604,16 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         return
     entry = vault[alias]
     meta = entry.get("meta", {})
-    data = entry.get("data", {})
     d1_name = meta.get("dica1_name", "Dica1")
     d2_name = meta.get("dica2_name", "Dica2")
     v1 = safe_input(f"Digite [{d1_name}] atual: ")
     v2 = safe_input(f"Digite [{d2_name}] atual: ")
     try:
-        salt = binascii.unhexlify(data["salt"])
-        nonce = binascii.unhexlify(data["nonce"])
-        ct = base64.b64decode(data["cipher_b64"])
-        derived = derive_key(v1 + SEPARATOR + v2, salt)
-        plaintext = aesgcm_decrypt(nonce, ct, derived)
+        plaintext = decrypt_entry(entry, v1, v2)
         secret_old, extras_old = _unpack_secret_and_extras(plaintext)
+    except KdfUnavailable as e:
+        print(f"\n{e}")
+        return
     except Exception:
         print("Dicas incorretas ou dados corrompidos. Abortando.")
         return
@@ -584,11 +638,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         new_extras = prompt_extras_interactive(existing=extras_old)
     else:
         new_extras = extras_old or {}
-    combined = new_v1 + SEPARATOR + new_v2
-    salt = secrets.token_bytes(SALT_LEN)
-    derived = derive_key(combined, salt)
     payload_bytes = _pack_secret_and_extras(new_secret, new_extras)
-    nonce, ct = aesgcm_encrypt(payload_bytes, derived)
     entry = {
         "meta": {
             "dica1_name": new_d1_name,
@@ -596,11 +646,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
             "created": meta.get("created", _now_ts()),
             "updated": _now_ts()
         },
-        "data": {
-            "salt": binascii.hexlify(salt).decode('ascii'),
-            "nonce": binascii.hexlify(nonce).decode('ascii'),
-            "cipher_b64": base64.b64encode(ct).decode('ascii')
-        }
+        "data": encrypt_entry_data(payload_bytes, new_v1, new_v2)
     }
     create_backup("vault.gpg.bak")
     vault[alias] = entry
@@ -614,12 +660,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     print(f"[{entry['meta']['dica2_name']}]: {new_v2}")
     print("Anote novamente esses valores.")
     # reduzir exposição
-    try:
-        secret_old = None
-    except Exception:
-        pass
-    derived = None
-    combined = None
+    secret_old = None
     payload_bytes = None
     gc.collect()
 
@@ -866,14 +907,10 @@ def cli_mode(args: argparse.Namespace) -> None:
                 want = safe_input("Deseja adicionar extras (nota, totp, etc.)? (s/N): ").lower() == "s"
                 if want:
                     extras = prompt_extras_interactive()
-            combined = k1 + SEPARATOR + k2
-            salt = secrets.token_bytes(SALT_LEN)
-            derived = derive_key(combined, salt)
             payload_bytes = _pack_secret_and_extras(secret, extras)
-            nonce, ct = aesgcm_encrypt(payload_bytes, derived)
             vault[alias] = {
                 "meta": {"dica1_name": dica1_name, "dica2_name": dica2_name, "created": _now_ts()},
-                "data": {"salt": binascii.hexlify(salt).decode(), "nonce": binascii.hexlify(nonce).decode(), "cipher_b64": base64.b64encode(ct).decode()}
+                "data": encrypt_entry_data(payload_bytes, k1, k2)
             }
             save_vault(vault, passphrase)
             print(f"\nADICIONADO: {alias}")
@@ -885,7 +922,7 @@ def cli_mode(args: argparse.Namespace) -> None:
                     print(f" - {kk}: {vv}")
             copy_with_timeout(secret)
             # cleanup
-            secret = None; derived = None; combined = None; payload_bytes = None
+            secret = None; payload_bytes = None
             gc.collect()
         elif args.command == "get":
             alias = args.alias
@@ -893,15 +930,8 @@ def cli_mode(args: argparse.Namespace) -> None:
             if not entry:
                 print("Registro não encontrado.")
                 return
-            salt = binascii.unhexlify(entry["data"]["salt"])
-            nonce = binascii.unhexlify(entry["data"]["nonce"])
-            ct = base64.b64decode(entry["data"]["cipher_b64"])
-            dica1_val = maybe_b64decode(args.dica1)
-            dica2_val = maybe_b64decode(args.dica2)
-            combined = (dica1_val or "") + SEPARATOR + (dica2_val or "")
-            derived = derive_key(combined, salt)
             try:
-                plaintext = aesgcm_decrypt(nonce, ct, derived)
+                plaintext = decrypt_entry(entry, maybe_b64decode(args.dica1), maybe_b64decode(args.dica2))
                 secret, extras = _unpack_secret_and_extras(plaintext)
                 print(f"\nValor decifrado: {secret}")
                 if extras:
@@ -909,10 +939,12 @@ def cli_mode(args: argparse.Namespace) -> None:
                     for k, v in extras.items():
                         print(f" - {k}: {v}")
                 copy_with_timeout(secret)
+            except KdfUnavailable as e:
+                print(f"\n{e}")
             except Exception:
                 print("Falha ao decifrar — dicas incorretas?")
             finally:
-                secret = None; derived = None; combined = None
+                secret = None
                 gc.collect()
         elif args.command == "delete":
             if args.alias not in vault:
