@@ -377,21 +377,35 @@ def save_vault(vobj: Dict[str, Any], passphrase: str) -> bool:
     _chmod_private(VAULT_PATH)
     return ok
 
-def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
+def _backup_prefix(kind: str) -> str:
+    """Prefixo derivado do NOME do cofre, para dois cofres na mesma pasta
+    (a.gpg e b.gpg) não misturarem nem apagarem os backups um do outro."""
+    return f"{VAULT_PATH.name}.{kind}"
+
+def _list_backups(kind: str) -> List[Path]:
+    """Backups de um tipo ('bak' ou 'manualbak'), mais recentes primeiro.
+    Filtra por nome (e não por glob) para nomes de arquivo com [ ] * ?."""
+    prefix = _backup_prefix(kind) + "."
+    if not VAULT_DIR.exists():
+        return []
+    found = [p for p in VAULT_DIR.iterdir() if p.is_file() and p.name.startswith(prefix)]
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+
+def create_backup(kind: str = "bak") -> Optional[Path]:
     """
-    Cria backup do VAULT_PATH com prefixo e retorna o path criado.
-    Usado tanto para backups automáticos quanto manuais.
+    Cria backup do VAULT_PATH ('bak' = automático, 'manualbak' = manual) e
+    retorna o path criado.
     """
     if not VAULT_PATH.exists():
         return None
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    bak = VAULT_PATH.parent / f"{prefix}.{ts}"
+    # microssegundos no nome: duas operações no mesmo segundo não se sobrescrevem
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    bak = VAULT_DIR / f"{_backup_prefix(kind)}.{ts}"
     with open(VAULT_PATH, 'rb') as fsrc, open(bak, 'wb') as fdst:
         fdst.write(fsrc.read())
     _chmod_private(bak)
     # prune older
-    backups = sorted(VAULT_PATH.parent.glob(f"{prefix}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for old in backups[BACKUP_KEEP:]:
+    for old in _list_backups(kind)[BACKUP_KEEP:]:
         try:
             old.unlink()
         except Exception:
@@ -399,7 +413,7 @@ def create_backup(prefix: str = "vault.gpg.bak") -> Optional[Path]:
     return bak
 
 def backup_vault_auto() -> None:
-    create_backup("vault.gpg.bak")
+    create_backup("bak")
 
 # ---------------- helper para extras input ----------------
 def prompt_extras_interactive(existing: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -511,7 +525,7 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
         "data": encrypt_entry_data(payload_bytes, k1, k2)
     }
     # backup + salvar
-    create_backup("vault.gpg.bak")
+    create_backup("bak")
     vault[alias] = entry
     save_vault(vault, passphrase)
     print("\nADICIONADO:", alias)
@@ -582,7 +596,7 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     if confirm != alias:
         print("Confirmação incorreta. Abortando.")
         return
-    create_backup("vault.gpg.bak")
+    create_backup("bak")
     del vault[alias]
     try:
         save_vault(vault, passphrase)
@@ -646,7 +660,7 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         },
         "data": encrypt_entry_data(payload_bytes, new_v1, new_v2)
     }
-    create_backup("vault.gpg.bak")
+    create_backup("bak")
     vault[alias] = entry
     try:
         save_vault(vault, passphrase)
@@ -667,13 +681,13 @@ def op_backup(vault: Dict[str, Any], passphrase: str) -> None:
     if not VAULT_PATH.exists():
         print("Vault não existe. Nada a exportar.")
         return
-    dest = create_backup("vault.gpg.manualbak")
+    dest = create_backup("manualbak")
     if dest:
         print("Backup criado:", dest)
 
 def _parse_bak_ts(name: str) -> str:
     try:
-        ts = name.rsplit('.', 1)[-1]
+        ts = name.rsplit('.', 1)[-1][:14]  # ignora os microssegundos
         dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
@@ -681,12 +695,7 @@ def _parse_bak_ts(name: str) -> str:
 
 def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
     print("\n--- Restaurar backup ---")
-    ensure_vault_dir()
-    candidates: List[Path] = []
-    for p in sorted(VAULT_DIR.glob("vault.gpg.bak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
-        candidates.append(p)
-    for p in sorted(VAULT_DIR.glob("vault.gpg.manualbak.*"), key=lambda p: p.stat().st_mtime, reverse=True):
-        candidates.append(p)
+    candidates: List[Path] = _list_backups("bak") + _list_backups("manualbak")
     if not candidates:
         print("Nenhum backup encontrado em:", VAULT_DIR)
         return vault
@@ -714,7 +723,7 @@ def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
         print("Restauração não confirmada. Abortando.")
         return vault
     if VAULT_PATH.exists():
-        tmp_save = VAULT_PATH.parent / f"vault.gpg.pre_restore.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        tmp_save = VAULT_DIR / f"{VAULT_PATH.name}.pre_restore.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         try:
             with open(VAULT_PATH, 'rb') as fsrc, open(tmp_save, 'wb') as fdst:
                 fdst.write(fsrc.read())
