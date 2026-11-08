@@ -110,19 +110,6 @@ def sanitize_text(s: Optional[str], maxlen: Optional[int] = None) -> str:
         s = s[:maxlen]
     return s
 
-def maybe_b64decode(value: str) -> str:
-    """Tenta decodificar a string de Base64; se falhar, retorna o original."""
-    if not value:
-        return ""
-    try:
-        decoded = base64.b64decode(value).decode('utf-8')
-        # Verifica se é texto legível (printable ASCII)
-        if all(32 <= ord(c) <= 126 for c in decoded):
-            return decoded
-    except Exception:
-        pass
-    return value
-
 def is_valid_alias(alias: str) -> bool:
     return bool(re.match(r'^[\w\s\-@.]+$', alias))
 
@@ -841,8 +828,8 @@ def parse_args() -> argparse.Namespace:
     #Get
     get_p = sub.add_parser("get", help="Recuperar alias existente")
     get_p.add_argument("alias")
-    get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica (texto ou base64)")
-    get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica (texto ou base64)")
+    get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica")
+    get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica")
     # List
     sub.add_parser("list", help="Listar aliases armazenados")
     # Delete
@@ -931,7 +918,7 @@ def cli_mode(args: argparse.Namespace) -> None:
                 print("Registro não encontrado.")
                 return
             try:
-                plaintext = decrypt_entry(entry, maybe_b64decode(args.dica1), maybe_b64decode(args.dica2))
+                plaintext = decrypt_entry(entry, args.dica1 or "", args.dica2 or "")
                 secret, extras = _unpack_secret_and_extras(plaintext)
                 print(f"\nValor decifrado: {secret}")
                 if extras:
