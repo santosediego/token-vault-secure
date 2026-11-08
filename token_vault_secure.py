@@ -532,7 +532,7 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Adicionar novo alias ---")
     alias = safe_input("Alias (nome identificador): ", maxlen=120)
     if not alias or not is_valid_alias(alias):
-        print("Alias inválido.")
+        print("Nome inválido. Use letras, números, espaço e os símbolos - _ @ .")
         return
     if alias in vault:
         print("Já existe um registro com esse alias.")
@@ -632,7 +632,7 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     try:
         save_vault(vault, passphrase)
     except Exception as e:
-        print("Erro ao salvar vault:", e)
+        print("Erro ao salvar o cofre:", e)
         return
     print("Removido com sucesso.")
 
@@ -708,9 +708,9 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     gc.collect()
 
 def op_backup(vault: Dict[str, Any], passphrase: str) -> None:
-    print("\n--- Backup manual do vault ---")
+    print("\n--- Criar backup agora ---")
     if not VAULT_PATH.exists():
-        print("Vault não existe. Nada a exportar.")
+        print("Cofre não encontrado. Nada para copiar.")
         return
     dest = create_backup("manualbak")
     if dest:
@@ -726,14 +726,17 @@ def _parse_bak_ts(name: str) -> str:
 
 def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
     print("\n--- Restaurar backup ---")
-    candidates: List[Path] = _list_backups("bak") + _list_backups("manualbak")
+    candidates: List[Tuple[Path, str]] = (
+        [(p, "automático") for p in _list_backups("bak")]
+        + [(p, "manual") for p in _list_backups("manualbak")]
+    )
+    candidates.sort(key=lambda c: c[0].stat().st_mtime, reverse=True)
     if not candidates:
         print("Nenhum backup encontrado em:", VAULT_DIR)
         return vault
-    print("Backups encontrados:")
-    for i, p in enumerate(candidates, start=1):
-        pretty = _parse_bak_ts(p.name)
-        print(f"{i:2d}. {p.name}  ({pretty})")
+    print("Backups encontrados (mais recentes primeiro):")
+    for i, (p, kind) in enumerate(candidates, start=1):
+        print(f"{i:2d}. {_parse_bak_ts(p.name)}  ({kind})")
     print("\nDigite o número do backup para restaurar, ou Enter para cancelar.")
     sel = input("Número: ").strip()
     if not sel:
@@ -747,10 +750,10 @@ def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
     except ValueError:
         print("Entrada inválida. Abortando.")
         return vault
-    chosen = candidates[idx]
+    chosen, kind = candidates[idx]
     pretty_chosen = _parse_bak_ts(chosen.name)
-    confirm = sanitize_text(input(f"Confirma restaurar '{chosen.name}' ({pretty_chosen}) ? (digite YES para confirmar): ")).strip()
-    if confirm != "YES":
+    confirm = sanitize_text(input(f"Restaurar o backup {kind} de {pretty_chosen}? Digite SIM para confirmar: ")).strip()
+    if confirm.upper() != "SIM":
         print("Restauração não confirmada. Abortando.")
         return vault
     if VAULT_PATH.exists():
@@ -759,9 +762,9 @@ def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
             with open(VAULT_PATH, 'rb') as fsrc, open(tmp_save, 'wb') as fdst:
                 fdst.write(fsrc.read())
             _chmod_private(tmp_save)
-            print(f"Cópia do vault atual salva em: {tmp_save.name}")
+            print(f"Cópia do cofre atual salva em: {tmp_save.name}")
         except Exception as e:
-            print("Falha ao salvar cópia do vault atual:", e)
+            print("Falha ao salvar cópia do cofre atual:", e)
             return vault
     try:
         ensure_vault_dir()
@@ -776,8 +779,8 @@ def op_restore(vault: Dict[str, Any], passphrase: str) -> Dict[str, Any]:
         print("Backup restaurado com sucesso e cofre recarregado.")
         return new_vault
     except Exception as e:
-        print("Backup restaurado, mas falha ao recarregar o cofre com a passphrase atual:", e)
-        print("Se a passphrase for diferente para esse backup, utilize a opção de carregar manualmente.")
+        print("Backup restaurado, mas não abriu com a senha mestra atual:", e)
+        print("Se esse backup usa outra senha mestra, feche o programa e abra de novo com ela.")
         return vault
 
 # ---------------- UI / utilitários menores ----------------
@@ -808,6 +811,17 @@ def ask_master_passphrase(prompt: str = "Senha mestra do cofre: ") -> Optional[s
         print("Senhas não conferem ou vazias.")
         return None
     return p1
+
+def open_vault(passphrase: str) -> Optional[Dict[str, Any]]:
+    """Abre o cofre com mensagens amigáveis (a mesma no menu e no CLI).
+    Retorna None se não conseguir abrir."""
+    try:
+        return load_vault(passphrase)
+    except RuntimeError:
+        print("Falha ao abrir o cofre: senha mestra incorreta ou cofre corrompido.")
+    except Exception as e:
+        print("Erro ao abrir o cofre:", e)
+    return None
 
 def type_effect(text: str, delay: float = 0.02, newline: bool = True) -> None:
     for ch in text:
@@ -842,13 +856,11 @@ def print_banner(title: str = "Token Vault Secure") -> None:
 # ---------------- menu / CLI ----------------
 def menu_loop() -> None:
     header()
-    passphrase = ask_master_passphrase("Passphrase do cofre: ")
+    passphrase = ask_master_passphrase()
     if passphrase is None:
         return
-    try:
-        vault = load_vault(passphrase)
-    except Exception as e:
-        print("Erro ao abrir vault:", e)
+    vault = open_vault(passphrase)
+    if vault is None:
         return
     while True:
         clear_screen()
@@ -942,13 +954,8 @@ def cli_mode(args: argparse.Namespace) -> None:
         return
     if passphrase is None:
         return
-    try:
-        vault = load_vault(passphrase)
-    except RuntimeError:
-        print("Falha ao abrir vault: senha mestra incorreta ou vault corrompido.")
-        return
-    except Exception as e:
-        print("Erro ao abrir vault:", e)
+    vault = open_vault(passphrase)
+    if vault is None:
         return
     try:
         if args.command == "list":
@@ -1028,9 +1035,12 @@ def cli_mode(args: argparse.Namespace) -> None:
             if args.alias not in vault:
                 print("Alias não encontrada.")
                 return
-            confirm = input(f"Confirma exclusão de '{args.alias}'? (s/n): ").lower()
-            if confirm == "s":
-                del vault[args.alias]; save_vault(vault, passphrase); print("Excluída com sucesso.")
+            confirm = safe_input(f"Para confirmar a exclusão de '{args.alias}', digite o nome completo: ", maxlen=120)
+            if confirm != args.alias:
+                print("Confirmação incorreta. Abortando.")
+                return
+            create_backup("bak")
+            del vault[args.alias]; save_vault(vault, passphrase); print("Excluído com sucesso.")
         elif args.command == "backup":
             op_backup(vault, passphrase)
         elif args.command == "restore":
