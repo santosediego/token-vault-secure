@@ -95,7 +95,7 @@ PBKDF2_ITERS = int(os.getenv("VAULT_PBKDF2_ITERS", "250000"))
 
 BACKUP_KEEP = int(os.getenv("VAULT_BACKUP_KEEP", "5"))
 
-AUTO_DICA_LEN = int(os.getenv("VAULT_AUTO_DICA_LEN", "24"))
+AUTO_CODIGO_LEN = int(os.getenv("VAULT_AUTO_CODIGO_LEN", "24"))
 CLIPBOARD_TIMEOUT = int(os.getenv("VAULT_CLIP_TIMEOUT", "30"))
 
 SEPARATOR = "\x1e"
@@ -136,8 +136,18 @@ def _rand_base62(nchars: int) -> str:
             num //= len(alphabet)
     return ''.join(out[:nchars])
 
-def gen_dica_auto() -> str:
-    return _rand_base62(AUTO_DICA_LEN)
+def gen_codigo_auto() -> str:
+    return _rand_base62(AUTO_CODIGO_LEN)
+
+DEFAULT_LEMBRETES = ("Código 1", "Código 2")
+
+def print_codes(l1: str, k1: str, l2: str, k2: str, intro: str, clears_screen: bool = True) -> None:
+    """Mostra os dois códigos de um registro, com o aviso para anotá-los."""
+    print(f"\n{intro}")
+    print(f"  Código 1 [{l1}]: {k1}")
+    print(f"  Código 2 [{l2}]: {k2}")
+    if clears_screen:
+        print("\nA tela será limpa quando você continuar.")
 
 def sanitize_text(s: Optional[str], maxlen: Optional[int] = None) -> str:
     if s is None:
@@ -230,15 +240,15 @@ class KdfUnavailable(RuntimeError):
     """O KDF exigido pela entrada não está disponível nesta máquina
     (ex.: entrada criada com Argon2id, mas 'argon2-cffi' não instalado).
     Tem classe própria para NÃO ser engolida pelo 'except Exception' genérico
-    e virar a mensagem enganosa de 'dicas incorretas'."""
+    e virar a mensagem enganosa de 'códigos incorretos'."""
 
-def normalize_dica(value: Optional[str]) -> str:
-    """Normalização ÚNICA da dica. Usada em TODOS os caminhos (add/get,
-    interativo/CLI) para a mesma dica gerar sempre a mesma chave."""
+def normalize_codigo(value: Optional[str]) -> str:
+    """Normalização ÚNICA do código. Usada em TODOS os caminhos (add/get,
+    interativo/CLI) para o mesmo código gerar sempre a mesma chave."""
     return sanitize_text(value or "")
 
-def _combined_from_dicas(d1: str, d2: str) -> str:
-    return normalize_dica(d1) + SEPARATOR + normalize_dica(d2)
+def _combined_from_codigos(d1: str, d2: str) -> str:
+    return normalize_codigo(d1) + SEPARATOR + normalize_codigo(d2)
 
 def current_kdf_params() -> Dict[str, Any]:
     """Descritor do KDF para NOVAS entradas, conforme o ambiente atual."""
@@ -292,7 +302,7 @@ def encrypt_entry_data(payload_bytes: bytes, d1: str, d2: str) -> Dict[str, Any]
     JÁ com o descritor de KDF salvo."""
     kdf = current_kdf_params()
     salt = secrets.token_bytes(SALT_LEN)
-    derived = derive_key_with(_combined_from_dicas(d1, d2), salt, kdf)
+    derived = derive_key_with(_combined_from_codigos(d1, d2), salt, kdf)
     nonce, ct = aesgcm_encrypt(payload_bytes, derived)
     return {
         "salt": binascii.hexlify(salt).decode(),
@@ -308,7 +318,7 @@ def decrypt_entry(entry: Dict[str, Any], d1: str, d2: str) -> bytes:
     salt = binascii.unhexlify(data["salt"])
     nonce = binascii.unhexlify(data["nonce"])
     ct = base64.b64decode(data["cipher_b64"])
-    combined = _combined_from_dicas(d1, d2)
+    combined = _combined_from_codigos(d1, d2)
     kdf = data.get("kdf")
     if kdf:
         return aesgcm_decrypt(nonce, ct, derive_key_with(combined, salt, kdf))
@@ -453,18 +463,18 @@ def prompt_extras_interactive(existing: Optional[Dict[str, str]] = None) -> Dict
     Retorna dict (padrão {} se vazio).
     """
     extras = dict(existing) if existing else {}
-    print("\n--- Extras (opcional) ---")
-    print("Insira pares chave=valor. Deixe em branco e pressione Enter quando terminar.")
+    print("\n--- Campos adicionais (opcional) ---")
+    print("Guarde outras informações junto ao segredo (usuário, URL, TOTP, notas).")
     if extras:
-        print("Extras atuais:")
+        print("Campos atuais:")
         for k, v in extras.items():
             print(f" - {k}: {v}")
     while True:
-        raw = safe_input("Chave (Enter p/ terminar): ").strip()
+        raw = safe_input("Nome do campo (Enter para terminar): ").strip()
         if not raw:
             break
         key = sanitize_text(raw, maxlen=120)
-        val = safe_input(f"Valor para '{key}': ")
+        val = safe_input(f"Valor de '{key}': ")
         extras[key] = val
     return extras
 
@@ -537,21 +547,26 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     if alias in vault:
         print("Já existe um registro com esse nome.")
         return
-    dica1_name = safe_input("Dica 1 (descrição): ", maxlen=120)
-    dica2_name = safe_input("Dica 2 (descrição): ", maxlen=120)
-    k1 = sanitize_text(safe_input("Valor Dica 1 (Enter p/ gerar): ")) or gen_dica_auto()
-    k2 = sanitize_text(safe_input("Valor Dica 2 (Enter p/ gerar): ")) or gen_dica_auto()
+    print("\nO segredo será protegido por dois códigos. Cada código tem um lembrete,")
+    print("que aparece na hora de abrir o registro.\n")
+    lembrete1 = safe_input('Lembrete do código 1 (ex.: "código do servidor A"): ', maxlen=120) or DEFAULT_LEMBRETES[0]
+    k1 = sanitize_text(safe_input("Código 1 (Enter para gerar automaticamente, recomendado): ")) or gen_codigo_auto()
+    lembrete2 = safe_input("Lembrete do código 2: ", maxlen=120) or DEFAULT_LEMBRETES[1]
+    k2 = sanitize_text(safe_input("Código 2 (Enter para gerar automaticamente, recomendado): ")) or gen_codigo_auto()
     secret = getpass.getpass("Segredo (senha, token, chave de API): ")
     if not secret:
         print("Segredo vazio; abortando.")
         return
-    # extras interativo
-    extras = prompt_extras_interactive()
+    extras: Dict[str, str] = {}
+    if safe_input("Adicionar campos adicionais (usuário, URL, TOTP, notas)? (s/N): ").lower() == "s":
+        extras = prompt_extras_interactive()
     # pack secret + extras into JSON bytes, then encrypt (KDF fica gravado na entrada)
     payload_bytes = _pack_secret_and_extras(secret, extras)
     entry = {
-        "meta": {"dica1_name": dica1_name or "Dica1",
-                 "dica2_name": dica2_name or "Dica2",
+        # as chaves "dica1_name"/"dica2_name" guardam o lembrete do código 1/2;
+        # o nome antigo é mantido no arquivo para cofres já existentes continuarem abrindo
+        "meta": {"dica1_name": lembrete1,
+                 "dica2_name": lembrete2,
                  "created": _now_ts()},
         "data": encrypt_entry_data(payload_bytes, k1, k2)
     }
@@ -560,10 +575,11 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     vault[alias] = entry
     save_vault(vault, passphrase)
     print("\nRegistro criado:", alias)
-    print(f"[{entry['meta']['dica1_name']}]: {k1}")
-    print(f"[{entry['meta']['dica2_name']}]: {k2}")
+    print_codes(lembrete1, k1, lembrete2, k2,
+                "ANOTE os dois códigos agora. Eles não ficam guardados em lugar nenhum\n"
+                "e, sem eles, o segredo não abre:")
     if extras:
-        print("Extras adicionados:")
+        print("\nCampos adicionais:")
         for kk, vv in extras.items():
             print(f" - {kk}: {vv}")
     copy_with_timeout(secret)
@@ -580,24 +596,24 @@ def op_get(vault: Dict[str, Any], passphrase: str) -> None:
         return
     entry = vault[alias]
     meta = entry.get("meta", {})
-    d1_name = meta.get("dica1_name", "Dica1")
-    d2_name = meta.get("dica2_name", "Dica2")
-    v1 = safe_input(f"Digite [{d1_name}]: ")
-    v2 = safe_input(f"Digite [{d2_name}]: ")
+    d1_name = meta.get("dica1_name", DEFAULT_LEMBRETES[0])
+    d2_name = meta.get("dica2_name", DEFAULT_LEMBRETES[1])
+    v1 = safe_input(f"Código 1 [{d1_name}]: ")
+    v2 = safe_input(f"Código 2 [{d2_name}]: ")
     try:
         plaintext = decrypt_entry(entry, v1, v2)
         secret, extras = _unpack_secret_and_extras(plaintext)
         print(f"\nRegistro: {alias}")
         print(f"Segredo: {secret}")
         if extras:
-            print("\nExtras:")
+            print("\nCampos adicionais:")
             for k, val in extras.items():
                 print(f" - {k}: {val}")
         copy_with_timeout(secret)
     except KdfUnavailable as e:
         print(f"\n{e}")
     except Exception:
-        print("Dicas incorretas ou dados corrompidos.")
+        print("Códigos incorretos ou dados corrompidos.")
     finally:
         # reduzir exposição
         try:
@@ -647,10 +663,10 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         return
     entry = vault[alias]
     meta = entry.get("meta", {})
-    d1_name = meta.get("dica1_name", "Dica1")
-    d2_name = meta.get("dica2_name", "Dica2")
-    v1 = safe_input(f"Digite [{d1_name}] atual: ")
-    v2 = safe_input(f"Digite [{d2_name}] atual: ")
+    d1_name = meta.get("dica1_name", DEFAULT_LEMBRETES[0])
+    d2_name = meta.get("dica2_name", DEFAULT_LEMBRETES[1])
+    v1 = safe_input(f"Código 1 atual [{d1_name}]: ")
+    v2 = safe_input(f"Código 2 atual [{d2_name}]: ")
     try:
         plaintext = decrypt_entry(entry, v1, v2)
         secret_old, extras_old = _unpack_secret_and_extras(plaintext)
@@ -658,25 +674,25 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         print(f"\n{e}")
         return
     except Exception:
-        print("Dicas incorretas ou dados corrompidos. Abortando.")
+        print("Códigos incorretos ou dados corrompidos. Abortando.")
         return
     print("\nValores atuais:")
     print(f"Registro: {alias}")
-    print(f"{d1_name}: {v1}")
-    print(f"{d2_name}: {v2}")
+    print(f"Código 1 [{d1_name}]: {v1}")
+    print(f"Código 2 [{d2_name}]: {v2}")
     print(f"Segredo atual: {secret_old}")
     if extras_old:
-        print("Extras atuais:")
+        print("Campos atuais:")
         for k, val in extras_old.items():
             print(f" - {k}: {val}")
     print("Deixe em branco para manter o valor atual.\n")
-    new_d1_name = safe_input(f"Novo nome para [{d1_name}]: ", maxlen=120) or d1_name
-    new_d2_name = safe_input(f"Novo nome para [{d2_name}]: ", maxlen=120) or d2_name
-    new_v1 = safe_input(f"Novo valor para [{new_d1_name}]: ") or v1
-    new_v2 = safe_input(f"Novo valor para [{new_d2_name}]: ") or v2
+    new_d1_name = safe_input(f"Novo lembrete do código 1 [{d1_name}]: ", maxlen=120) or d1_name
+    new_v1 = safe_input("Novo código 1: ") or v1
+    new_d2_name = safe_input(f"Novo lembrete do código 2 [{d2_name}]: ", maxlen=120) or d2_name
+    new_v2 = safe_input("Novo código 2: ") or v2
     new_secret = getpass.getpass("Novo segredo (Enter para manter): ") or secret_old
     # editar extras?
-    edit_extras = safe_input("Editar extras? (s/N): ").lower() == "s"
+    edit_extras = safe_input("Editar campos adicionais? (s/N): ").lower() == "s"
     if edit_extras:
         new_extras = prompt_extras_interactive(existing=extras_old)
     else:
@@ -699,9 +715,8 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         print("Erro ao salvar alterações:", e)
         return
     print("\nRegistro atualizado com sucesso.")
-    print(f"[{entry['meta']['dica1_name']}]: {new_v1}")
-    print(f"[{entry['meta']['dica2_name']}]: {new_v2}")
-    print("Anote novamente esses valores.")
+    print_codes(new_d1_name, new_v1, new_d2_name, new_v2,
+                "ANOTE os códigos de novo (inclusive os que não mudaram):")
     # reduzir exposição
     secret_old = None
     payload_bytes = None
@@ -919,15 +934,15 @@ def parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command")
     add_p = sub.add_parser("add", help="Adicionar novo registro", parents=[common])
     add_p.add_argument("nome")
-    add_p.add_argument("--dica1", help="Descrição da primeiro dica (Chave gerada automaticamente)")
-    add_p.add_argument("--dica2", help="Descrição da segunda dica (Chave gerada automaticamente)")
+    add_p.add_argument("--lembrete1", help="Lembrete do código 1 (o código é gerado automaticamente)")
+    add_p.add_argument("--lembrete2", help="Lembrete do código 2 (o código é gerado automaticamente)")
     add_p.add_argument("--segredo", help="Valor do segredo")
-    add_p.add_argument("--extras-json", help="Extras em JSON (ex: '{\"totp\":\"JBS...\",\"nota\":\"...\"}')")
+    add_p.add_argument("--campos-json", help="Campos adicionais em JSON (ex: '{\"totp\":\"JBS...\",\"nota\":\"...\"}')")
     #Get
     get_p = sub.add_parser("get", help="Abrir registro existente", parents=[common])
     get_p.add_argument("nome")
-    get_p.add_argument("--dica1", help="Informa a chave referente a primeira dica")
-    get_p.add_argument("--dica2", help="Informa a chave referente a segunda dica")
+    get_p.add_argument("--codigo1", help="Código 1 (se omitido, será pedido)")
+    get_p.add_argument("--codigo2", help="Código 2 (se omitido, será pedido)")
     # List
     sub.add_parser("list", help="Listar registros", parents=[common])
     # Delete
@@ -969,42 +984,41 @@ def cli_mode(args: argparse.Namespace) -> None:
                 print(f" - {lbl}")
         elif args.command == "add":
             alias = sanitize_text(args.nome)
-            dica1_name = args.dica1 if args.dica1 is not None else safe_input("Nome para Dica 1 (ou Enter para 'Dica 1'): ")
-            if not dica1_name:
-                dica1_name = "Dica 1"
-            dica2_name = args.dica2 if args.dica2 is not None else safe_input("Nome para Dica 2 (ou Enter para 'Dica 2'): ")
-            if not dica2_name:
-                dica2_name = "Dica 2"
-            k1 = gen_dica_auto()
-            k2 = gen_dica_auto()
+            lembrete1 = args.lembrete1 if args.lembrete1 is not None else safe_input("Lembrete do código 1 (Enter para 'Código 1'): ", maxlen=120)
+            lembrete1 = lembrete1 or DEFAULT_LEMBRETES[0]
+            lembrete2 = args.lembrete2 if args.lembrete2 is not None else safe_input("Lembrete do código 2 (Enter para 'Código 2'): ", maxlen=120)
+            lembrete2 = lembrete2 or DEFAULT_LEMBRETES[1]
+            k1 = gen_codigo_auto()
+            k2 = gen_codigo_auto()
             secret = args.segredo or getpass.getpass("Segredo (senha, token, chave de API): ")
             # extras from CLI JSON
             extras = {}
-            if getattr(args, "extras_json", None):
+            if getattr(args, "campos_json", None):
                 try:
-                    extras = json.loads(args.extras_json)
+                    extras = json.loads(args.campos_json)
                     if not isinstance(extras, dict):
-                        print(" --extras-json deve ser um objeto JSON (dicionário). Ignorando extras.")
+                        print(" --campos-json deve ser um objeto JSON (dicionário). Ignorando os campos adicionais.")
                         extras = {}
                 except Exception:
-                    print("Não foi possível interpretar --extras-json como JSON. Ignorando extras.")
+                    print("Não foi possível interpretar --campos-json como JSON. Ignorando os campos adicionais.")
                     extras = {}
             else:
                 # interactive prompt for extras (if desired)
-                want = safe_input("Deseja adicionar extras (nota, totp, etc.)? (s/N): ").lower() == "s"
+                want = safe_input("Adicionar campos adicionais (usuário, URL, TOTP, notas)? (s/N): ").lower() == "s"
                 if want:
                     extras = prompt_extras_interactive()
             payload_bytes = _pack_secret_and_extras(secret, extras)
             vault[alias] = {
-                "meta": {"dica1_name": dica1_name, "dica2_name": dica2_name, "created": _now_ts()},
+                "meta": {"dica1_name": lembrete1, "dica2_name": lembrete2, "created": _now_ts()},
                 "data": encrypt_entry_data(payload_bytes, k1, k2)
             }
             save_vault(vault, passphrase)
             print(f"\nRegistro criado: {alias}")
-            print(f"[{dica1_name}]: {k1}")
-            print(f"[{dica2_name}]: {k2}")
+            print_codes(lembrete1, k1, lembrete2, k2,
+                        "ANOTE os dois códigos agora. Eles não ficam guardados em lugar nenhum\n"
+                        "e, sem eles, o segredo não abre:", clears_screen=False)
             if extras:
-                print("Extras adicionados:")
+                print("\nCampos adicionais:")
                 for kk, vv in extras.items():
                     print(f" - {kk}: {vv}")
             copy_with_timeout(secret)
@@ -1017,19 +1031,24 @@ def cli_mode(args: argparse.Namespace) -> None:
             if not entry:
                 print("Registro não encontrado.")
                 return
+            meta = entry.get("meta", {})
+            c1 = args.codigo1 if args.codigo1 is not None else safe_input(
+                f"Código 1 [{meta.get('dica1_name', DEFAULT_LEMBRETES[0])}]: ")
+            c2 = args.codigo2 if args.codigo2 is not None else safe_input(
+                f"Código 2 [{meta.get('dica2_name', DEFAULT_LEMBRETES[1])}]: ")
             try:
-                plaintext = decrypt_entry(entry, args.dica1 or "", args.dica2 or "")
+                plaintext = decrypt_entry(entry, c1, c2)
                 secret, extras = _unpack_secret_and_extras(plaintext)
                 print(f"\nSegredo: {secret}")
                 if extras:
-                    print("\nExtras:")
+                    print("\nCampos adicionais:")
                     for k, v in extras.items():
                         print(f" - {k}: {v}")
                 copy_with_timeout(secret)
             except KdfUnavailable as e:
                 print(f"\n{e}")
             except Exception:
-                print("Falha ao decifrar — dicas incorretas?")
+                print("Falha ao decifrar: códigos incorretos ou registro corrompido.")
             finally:
                 secret = None
                 gc.collect()
