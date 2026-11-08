@@ -18,6 +18,7 @@ import random
 import argparse
 import shutil
 import platform
+import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple, List
@@ -162,15 +163,35 @@ def sanitize_text(s: Optional[str], maxlen: Optional[int] = None) -> str:
 def is_valid_alias(alias: str) -> bool:
     return bool(re.match(r'^[\w\s\-@.]+$', alias))
 
-def safe_input(prompt: str = "", maxlen: Optional[int] = None, default: Optional[str] = None) -> str:
+def sanitize_label(s: Optional[str], maxlen: Optional[int] = None) -> str:
+    """
+    Como sanitize_text, mas preserva acentos e outros caracteres imprimíveis.
+    Serve para o que só é EXIBIDO (nome do registro, lembretes, campos
+    adicionais). Continua removendo escapes ANSI e caracteres de controle ou
+    de formatação (inclusive os que invertem o sentido do texto).
+    NÃO usar nos códigos: a chave é derivada do texto ASCII normalizado.
+    """
+    if s is None:
+        return ''
+    s = _ANSI_ESC_RE.sub('', s)
+    s = unicodedata.normalize('NFC', s)
+    s = ''.join(ch for ch in s if ch.isprintable() or ch == ' ')
+    s = ' '.join(s.split())
+    if maxlen is not None and len(s) > maxlen:
+        s = s[:maxlen]
+    return s
+
+def safe_input(prompt: str = "", maxlen: Optional[int] = None, default: Optional[str] = None,
+               keep_unicode: bool = False) -> str:
     """
     Faz input() e sanitiza o resultado; retorna default se string vazia e default fornecido.
+    keep_unicode=True preserva acentos (para nomes e lembretes); o padrão é só ASCII.
     """
     try:
         raw = input(prompt)
     except KeyboardInterrupt:
         raise
-    val = sanitize_text(raw, maxlen=maxlen)
+    val = (sanitize_label if keep_unicode else sanitize_text)(raw, maxlen=maxlen)
     if not val and default is not None:
         return default
     return val
@@ -246,6 +267,17 @@ def normalize_codigo(value: Optional[str]) -> str:
     """Normalização ÚNICA do código. Usada em TODOS os caminhos (add/get,
     interativo/CLI) para o mesmo código gerar sempre a mesma chave."""
     return sanitize_text(value or "")
+
+def read_codigo_novo(prompt: str) -> str:
+    """Lê um código digitado ao CRIAR ou EDITAR. Os códigos aceitam só ASCII
+    visível; avisa se algo foi descartado (senão o código ficaria mais fraco
+    em silêncio)."""
+    raw = input(prompt)
+    val = normalize_codigo(raw)
+    if val != ' '.join(raw.split()):
+        print("(Aviso: os códigos aceitam só caracteres ASCII visíveis, sem acentos; "
+              "os demais foram descartados.)")
+    return val
 
 def _combined_from_codigos(d1: str, d2: str) -> str:
     return normalize_codigo(d1) + SEPARATOR + normalize_codigo(d2)
@@ -470,11 +502,11 @@ def prompt_extras_interactive(existing: Optional[Dict[str, str]] = None) -> Dict
         for k, v in extras.items():
             print(f" - {k}: {v}")
     while True:
-        raw = safe_input("Nome do campo (Enter para terminar): ").strip()
+        raw = safe_input("Nome do campo (Enter para terminar): ", keep_unicode=True).strip()
         if not raw:
             break
-        key = sanitize_text(raw, maxlen=120)
-        val = safe_input(f"Valor de '{key}': ")
+        key = sanitize_label(raw, maxlen=120)
+        val = safe_input(f"Valor de '{key}': ", keep_unicode=True)
         extras[key] = val
     return extras
 
@@ -540,7 +572,7 @@ def _unpack_secret_and_extras(plaintext_bytes: bytes) -> Tuple[str, Dict[str, st
 
 def op_add(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Novo registro ---")
-    alias = safe_input("Nome do registro (ex.: servidor-a): ", maxlen=120)
+    alias = safe_input("Nome do registro (ex.: servidor-a): ", maxlen=120, keep_unicode=True)
     if not alias or not is_valid_alias(alias):
         print("Nome inválido. Use letras, números, espaço e os símbolos - _ @ .")
         return
@@ -549,10 +581,10 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
         return
     print("\nO segredo será protegido por dois códigos. Cada código tem um lembrete,")
     print("que aparece na hora de abrir o registro.\n")
-    lembrete1 = safe_input('Lembrete do código 1 (ex.: "código do servidor A"): ', maxlen=120) or DEFAULT_LEMBRETES[0]
-    k1 = sanitize_text(safe_input("Código 1 (Enter para gerar automaticamente, recomendado): ")) or gen_codigo_auto()
-    lembrete2 = safe_input("Lembrete do código 2: ", maxlen=120) or DEFAULT_LEMBRETES[1]
-    k2 = sanitize_text(safe_input("Código 2 (Enter para gerar automaticamente, recomendado): ")) or gen_codigo_auto()
+    lembrete1 = safe_input('Lembrete do código 1 (ex.: "código do servidor A"): ', maxlen=120, keep_unicode=True) or DEFAULT_LEMBRETES[0]
+    k1 = read_codigo_novo("Código 1 (Enter para gerar automaticamente, recomendado): ") or gen_codigo_auto()
+    lembrete2 = safe_input("Lembrete do código 2: ", maxlen=120, keep_unicode=True) or DEFAULT_LEMBRETES[1]
+    k2 = read_codigo_novo("Código 2 (Enter para gerar automaticamente, recomendado): ") or gen_codigo_auto()
     secret = getpass.getpass("Segredo (senha, token, chave de API): ")
     if not secret:
         print("Segredo vazio; abortando.")
@@ -590,7 +622,7 @@ def op_add(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_get(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Abrir registro ---")
-    alias = safe_input("Nome do registro: ", maxlen=120)
+    alias = safe_input("Nome do registro: ", maxlen=120, keep_unicode=True)
     if alias not in vault:
         print("Registro não encontrado.")
         return
@@ -632,14 +664,14 @@ def op_list(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Excluir registro ---")
-    alias = safe_input("Nome do registro: ", maxlen=120)
+    alias = safe_input("Nome do registro: ", maxlen=120, keep_unicode=True)
     if not alias:
         print("É necessário informar o nome do registro.")
         return
     if alias not in vault:
         print("Registro não encontrado.")
         return
-    confirm = safe_input(f"Para confirmar a exclusão de '{alias}', digite o nome completo: ", maxlen=120)
+    confirm = safe_input(f"Para confirmar a exclusão de '{alias}', digite o nome completo: ", maxlen=120, keep_unicode=True)
     if confirm != alias:
         print("Confirmação incorreta. Abortando.")
         return
@@ -654,7 +686,7 @@ def op_delete(vault: Dict[str, Any], passphrase: str) -> None:
 
 def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
     print("\n--- Editar registro ---")
-    alias = safe_input("Nome do registro: ", maxlen=120)
+    alias = safe_input("Nome do registro: ", maxlen=120, keep_unicode=True)
     if not alias:
         print("É necessário informar o nome do registro.")
         return
@@ -686,10 +718,10 @@ def op_edit(vault: Dict[str, Any], passphrase: str) -> None:
         for k, val in extras_old.items():
             print(f" - {k}: {val}")
     print("Deixe em branco para manter o valor atual.\n")
-    new_d1_name = safe_input(f"Novo lembrete do código 1 [{d1_name}]: ", maxlen=120) or d1_name
-    new_v1 = safe_input("Novo código 1: ") or v1
-    new_d2_name = safe_input(f"Novo lembrete do código 2 [{d2_name}]: ", maxlen=120) or d2_name
-    new_v2 = safe_input("Novo código 2: ") or v2
+    new_d1_name = safe_input(f"Novo lembrete do código 1 [{d1_name}]: ", maxlen=120, keep_unicode=True) or d1_name
+    new_v1 = read_codigo_novo("Novo código 1: ") or v1
+    new_d2_name = safe_input(f"Novo lembrete do código 2 [{d2_name}]: ", maxlen=120, keep_unicode=True) or d2_name
+    new_v2 = read_codigo_novo("Novo código 2: ") or v2
     new_secret = getpass.getpass("Novo segredo (Enter para manter): ") or secret_old
     # editar extras?
     edit_extras = safe_input("Editar campos adicionais? (s/N): ").lower() == "s"
@@ -983,10 +1015,10 @@ def cli_mode(args: argparse.Namespace) -> None:
             for lbl in vault.keys():
                 print(f" - {lbl}")
         elif args.command == "add":
-            alias = sanitize_text(args.nome)
-            lembrete1 = args.lembrete1 if args.lembrete1 is not None else safe_input("Lembrete do código 1 (Enter para 'Código 1'): ", maxlen=120)
+            alias = sanitize_label(args.nome, maxlen=120)
+            lembrete1 = sanitize_label(args.lembrete1, maxlen=120) if args.lembrete1 is not None else safe_input("Lembrete do código 1 (Enter para 'Código 1'): ", maxlen=120, keep_unicode=True)
             lembrete1 = lembrete1 or DEFAULT_LEMBRETES[0]
-            lembrete2 = args.lembrete2 if args.lembrete2 is not None else safe_input("Lembrete do código 2 (Enter para 'Código 2'): ", maxlen=120)
+            lembrete2 = sanitize_label(args.lembrete2, maxlen=120) if args.lembrete2 is not None else safe_input("Lembrete do código 2 (Enter para 'Código 2'): ", maxlen=120, keep_unicode=True)
             lembrete2 = lembrete2 or DEFAULT_LEMBRETES[1]
             k1 = gen_codigo_auto()
             k2 = gen_codigo_auto()
@@ -1026,7 +1058,7 @@ def cli_mode(args: argparse.Namespace) -> None:
             secret = None; payload_bytes = None
             gc.collect()
         elif args.command == "get":
-            alias = args.nome
+            alias = sanitize_label(args.nome, maxlen=120)
             entry = vault.get(alias)
             if not entry:
                 print("Registro não encontrado.")
@@ -1053,10 +1085,11 @@ def cli_mode(args: argparse.Namespace) -> None:
                 secret = None
                 gc.collect()
         elif args.command == "delete":
+            args.nome = sanitize_label(args.nome, maxlen=120)
             if args.nome not in vault:
                 print("Registro não encontrado.")
                 return
-            confirm = safe_input(f"Para confirmar a exclusão de '{args.nome}', digite o nome completo: ", maxlen=120)
+            confirm = safe_input(f"Para confirmar a exclusão de '{args.nome}', digite o nome completo: ", maxlen=120, keep_unicode=True)
             if confirm != args.nome:
                 print("Confirmação incorreta. Abortando.")
                 return
